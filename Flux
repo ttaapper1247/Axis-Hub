@@ -123,7 +123,7 @@ function Flux:Window(text, bottom, mainclr, toclose)
     LeftFrame.Name = "LeftFrame"
     LeftFrame.Parent = MainFrame
     LeftFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-    LeftFrame.Size = UDim2.new(0, 190, 0, 484)
+    LeftFrame.Size = UDim2.new(0, 250, 0, 595)
 
     LeftCorner.CornerRadius = UDim.new(0, 5)
     LeftCorner.Name = "LeftCorner"
@@ -142,7 +142,7 @@ function Flux:Window(text, bottom, mainclr, toclose)
     GlowTabHolder.ScaleType = Enum.ScaleType.Slice
     GlowTabHolder.SliceCenter = Rect.new(20, 20, 280, 280)
     
-    Title.Name = "Title"
+    Title.Name = "Title" 
     Title.Parent = LeftFrame
     Title.BackgroundColor3 = Color3.fromRGB(255, 0, 11)
     Title.BackgroundTransparency = 1.000
@@ -191,7 +191,7 @@ function Flux:Window(text, bottom, mainclr, toclose)
 
     MakeDraggable(Drag, MainFrame)
     MakeDraggable(LeftFrame, MainFrame)
-    MainFrame:TweenSize(UDim2.new(0, 900, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .6, true)
+    MainFrame:TweenSize(UDim2.new(0, 700, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .6, true)
 
     local uitoggled = false
     
@@ -204,7 +204,7 @@ function Flux:Window(text, bottom, mainclr, toclose)
     
     local function ShowGUI()
         if GUIHidden then
-            MainFrame:TweenSize(UDim2.new(0, 1500, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .3, true)
+            MainFrame:TweenSize(UDim2.new(0, 700, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .3, true)
             GUIHidden = false
         end
     end
@@ -2174,4 +2174,5 @@ function Flux:Window(text, bottom, mainclr, toclose)
 end
 
 return Flux
+
 
