@@ -191,11 +191,10 @@ function Flux:Window(text, bottom, mainclr, toclose)
 
     MakeDraggable(Drag, MainFrame)
     MakeDraggable(LeftFrame, MainFrame)
-    MainFrame:TweenSize(UDim2.new(0, 900, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .6, true)
+    MainFrame:TweenSize(UDim2.new(200, 900, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .6, true)
 
     local uitoggled = false
     
-    -- Hide/Show function for the GUI
     local function HideGUI()
         if not GUIHidden then
             MainFrame:TweenSize(UDim2.new(0, 0, 0, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .3, true)
