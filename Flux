@@ -191,7 +191,7 @@ function Flux:Window(text, bottom, mainclr, toclose)
 
     MakeDraggable(Drag, MainFrame)
     MakeDraggable(LeftFrame, MainFrame)
-    MainFrame:TweenSize(UDim2.new(200, 900, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .6, true)
+    MainFrame:TweenSize(UDim2.new(1, 900, 1, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .6, true)
 
     local uitoggled = false
     
@@ -204,7 +204,7 @@ function Flux:Window(text, bottom, mainclr, toclose)
     
     local function ShowGUI()
         if GUIHidden then
-            MainFrame:TweenSize(UDim2.new(0, 900, 0, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .3, true)
+            MainFrame:TweenSize(UDim2.new(1, 900, 1, 600), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, .3, true)
             GUIHidden = false
         end
     end
@@ -217,13 +217,13 @@ function Flux:Window(text, bottom, mainclr, toclose)
         end
     end
     
-    -- Add a method to the Flux object to toggle GUI
+
     Flux.ToggleGUI = ToggleGUI
     Flux.HideGUI = HideGUI
     Flux.ShowGUI = ShowGUI
     Flux.IsVisible = function() return not GUIHidden end
     
-    -- Bind the close key to toggle GUI (like other libraries)
+
     UserInputService.InputBegan:Connect(
         function(io, gameProcessed)
             if gameProcessed then return end
