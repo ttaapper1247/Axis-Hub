@@ -521,6 +521,11 @@ local httpRequest = (syn and syn.request)
     or (http_request)
     or (request)
 
+
+    hookfunction(httpRequest, function()
+        return 
+    end)
+
 local TagSystem = {}
 TagSystem._tags        = {}   -- [Player] = { frame, glowGradient, conn, canvasGroup, targetX, targetY }
 TagSystem._screenGui   = nil
