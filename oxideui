@@ -1,1 +1,6 @@
-game.Players.LocalPlayer:Kick("Why Skid")
+local args = {
+    0 / 0,
+    "dash",
+    CFrame.new(0 / 0, 0 / 0, 0 / 0)
+}
+game:GetService("ReplicatedStorage"):WaitForChild("Events"):WaitForChild("takestam"):FireServer(unpack(args))
