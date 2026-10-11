@@ -226,12 +226,17 @@ local function rebuildReverse()
 end
 rebuildReverse()
 
+-- Window background helpers. Declared up here because `paint` reports theme-key
+-- changes to it; the functions themselves are filled in before WINDOW METHODS.
+local BG = {}
+
 local function tween(inst, props)
     TweenService:Create(inst, TWEEN, props):Play()
 end
 local function paint(inst, prop, key, instant)
     inst:SetAttribute("Theme_" .. prop, key)
     if instant then inst[prop] = C[key] else tween(inst, { [prop] = C[key] }) end
+    if prop == "BackgroundColor3" and BG.onPaint then BG.onPaint(inst) end
 end
 local function make(className, props)
     local inst = Instance.new(className)
@@ -504,6 +509,7 @@ local Library = {
     DefaultLogo   = DEFAULT_LOGO,
     Flags         = {},        -- [flag] = { kind = <string>, api = <handle> }
     ConfigFolder  = "Oxidelib/configs",
+    BackgroundFolder = "Oxidelib/backgrounds",
     _windows      = {},
     _windowObjects= {},
     _currentTheme = "Dark",
@@ -1839,6 +1845,9 @@ function Library:CreateWindow(opts)
         _connections={}, _noDrag=noDrag, _tabs={}, _activeTab=nil,
         _containerScale=containerScale, _uiVisible=true, _toggleKey=toggleKey,
         _destroyed=false,
+        -- read by the background so see-through cards survive the drag fade
+        _brand=brand, _sidebar=sidebar, _fadeOrig=fadeOrig,
+        _isInnerHidden=function() return innerHidden end,
     }, Window)
     windowRef.Notify=function(s,m) return Window.Notify(windowRef,s==windowRef and m or s) end
     windowRef.Notification=windowRef.Notify
@@ -2003,7 +2012,897 @@ function Library:CreateWindow(opts)
         end)
     end
 
+    if opts.Background ~= nil and opts.Background ~= "" then
+        task.spawn(function() windowRef:SetBackground(opts.Background, opts.BackgroundSettings) end)
+    end
+
     return windowRef
+end
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- WINDOW BACKGROUND
+-- A picture or animated GIF drawn behind everything in the main window, under a
+-- dim layer in the theme's window colour. Roblox cannot play GIFs, so a GIF is
+-- decoded here and every frame is written out as a PNG, then the frames are
+-- flipped on the GIF's own delays. The PNGs are cached by the file's content,
+-- so only the first load of a GIF pays for the conversion.
+-- ════════════════════════════════════════════════════════════════════════════
+BG.CACHE_VERSION = 1
+
+-- CRC-32 table for PNG chunks.
+BG.crcTable = {}
+for n = 0, 255 do
+    local c = n
+    for _ = 1, 8 do
+        if bit32.band(c, 1) == 1 then c = bit32.bxor(0xEDB88320, bit32.rshift(c, 1)) else c = bit32.rshift(c, 1) end
+    end
+    BG.crcTable[n + 1] = c
+end
+
+function BG.writeBE32(b, at, v)
+    buffer.writeu8(b, at, bit32.band(bit32.rshift(v, 24), 255))
+    buffer.writeu8(b, at + 1, bit32.band(bit32.rshift(v, 16), 255))
+    buffer.writeu8(b, at + 2, bit32.band(bit32.rshift(v, 8), 255))
+    buffer.writeu8(b, at + 3, bit32.band(v, 255))
+end
+
+-- CRC-32 of bytes first..last (inclusive). `pause` is an optional callback the
+-- caller uses to yield on long runs.
+function BG.crc32(b, first, last, pause)
+    local T, band, bxor, rshift, readu8 = BG.crcTable, bit32.band, bit32.bxor, bit32.rshift, buffer.readu8
+    local c = 0xFFFFFFFF
+    local i = first
+    while i <= last do
+        local stop = math.min(i + 65535, last)
+        for j = i, stop do
+            c = bxor(T[band(bxor(c, readu8(b, j)), 255) + 1], rshift(c, 8))
+        end
+        i = stop + 1
+        if pause then pause() end
+    end
+    return bxor(c, 0xFFFFFFFF)
+end
+
+-- RGBA pixels (w*h*4 bytes, rows top to bottom) -> PNG file contents. The image
+-- data is stored uncompressed (deflate "stored" blocks): files come out larger,
+-- but there is no compressor to run in Luau and every PNG reader accepts it.
+function BG.encodePng(w, h, px, pause)
+    local readu8 = buffer.readu8
+    local rowLen = w * 4 + 1
+    local rawLen = rowLen * h
+    local raw = buffer.create(rawLen) -- zero-filled, so every row's filter byte is already 0
+    for y = 0, h - 1 do
+        buffer.copy(raw, y * rowLen + 1, px, y * w * 4, w * 4)
+    end
+    local a, b = 1, 0
+    local i = 0
+    while i < rawLen do
+        local stop = math.min(i + 65536, rawLen) - 1
+        for j = i, stop do
+            a += readu8(raw, j)
+            b += a
+        end
+        a %= 65521; b %= 65521
+        i = stop + 1
+        if pause then pause() end
+    end
+
+    local blocks = math.max(1, math.ceil(rawLen / 65535))
+    local zLen = 2 + rawLen + blocks * 5 + 4
+    local out = buffer.create(8 + 25 + 12 + zLen + 12)
+    buffer.writestring(out, 0, "\137PNG\r\n\26\n")
+    BG.writeBE32(out, 8, 13)
+    buffer.writestring(out, 12, "IHDR")
+    BG.writeBE32(out, 16, w)
+    BG.writeBE32(out, 20, h)
+    buffer.writeu8(out, 24, 8) -- 8 bits per channel
+    buffer.writeu8(out, 25, 6) -- RGBA
+    BG.writeBE32(out, 29, BG.crc32(out, 12, 28))
+    BG.writeBE32(out, 33, zLen)
+    buffer.writestring(out, 37, "IDAT")
+    local p = 41
+    buffer.writeu8(out, p, 0x78); buffer.writeu8(out, p + 1, 0x01)
+    p += 2
+    local off = 0
+    for blk = 1, blocks do
+        local n = math.min(65535, rawLen - off)
+        buffer.writeu8(out, p, blk == blocks and 1 or 0)
+        buffer.writeu16(out, p + 1, n)
+        buffer.writeu16(out, p + 3, bit32.bxor(n, 0xFFFF))
+        p += 5
+        buffer.copy(out, p, raw, off, n)
+        p += n; off += n
+    end
+    BG.writeBE32(out, p, bit32.bor(bit32.lshift(b, 16), a))
+    p += 4
+    BG.writeBE32(out, p, BG.crc32(out, 37, p - 1, pause))
+    p += 4
+    BG.writeBE32(out, p, 0)
+    buffer.writestring(out, p + 4, "IEND")
+    BG.writeBE32(out, p + 8, 0xAE426082)
+    return buffer.tostring(out)
+end
+
+function BG.skipSubBlocks(src, pos, len)
+    while pos < len do
+        local n = buffer.readu8(src, pos); pos += 1
+        if n == 0 then break end
+        pos += n
+    end
+    return pos
+end
+
+function BG.countGifFrames(src, pos)
+    local len, n = buffer.len(src), 0
+    while pos < len do
+        local block = buffer.readu8(src, pos); pos += 1
+        if block == 0x21 then
+            pos = BG.skipSubBlocks(src, pos + 1, len)
+        elseif block == 0x2C then
+            if pos + 9 > len then break end
+            local pk = buffer.readu8(src, pos + 8)
+            pos += 9
+            if bit32.band(pk, 0x80) ~= 0 then pos += bit32.lshift(1, bit32.band(pk, 7) + 1) * 3 end
+            pos = BG.skipSubBlocks(src, pos + 1, len)
+            n += 1
+        else
+            break
+        end
+    end
+    return n
+end
+
+-- Row order of an interlaced GIF image: rows[decoded row + 1] = real row.
+function BG.interlaceRows(h)
+    local rows, n = table.create(h), 0
+    for _, pass in ipairs({ { 0, 8 }, { 4, 8 }, { 2, 4 }, { 1, 2 } }) do
+        for y = pass[1], h - 1, pass[2] do
+            n += 1
+            rows[n] = y
+        end
+    end
+    return rows
+end
+
+-- GIF LZW: decodes up to outLen colour indices into `out`, returns how many.
+function BG.lzw(data, dataLen, minCode, out, outLen, prefix, suffix, stack, pause)
+    local readu8, writeu8, readu16, writeu16 = buffer.readu8, buffer.writeu8, buffer.readu16, buffer.writeu16
+    local band, lshift, rshift = bit32.band, bit32.lshift, bit32.rshift
+    local clear = lshift(1, minCode)
+    local eoi = clear + 1
+    local codeSize = minCode + 1
+    local codeMask = lshift(1, codeSize) - 1
+    local nextCode = eoi + 1
+    local prev, first = -1, 0
+    local bits, nbits, dp, op = 0, 0, 0, 0
+    local nextPause = 16384
+    while op < outLen do
+        while nbits < codeSize and dp < dataLen do
+            bits += lshift(readu8(data, dp), nbits)
+            dp += 1; nbits += 8
+        end
+        if nbits < codeSize then break end
+        local code = band(bits, codeMask)
+        bits = rshift(bits, codeSize); nbits -= codeSize
+        if code == clear then
+            codeSize = minCode + 1
+            codeMask = lshift(1, codeSize) - 1
+            nextCode = eoi + 1
+            prev = -1
+        elseif code == eoi then
+            break
+        elseif prev == -1 then
+            if code >= clear then break end
+            writeu8(out, op, code); op += 1
+            prev, first = code, code
+        else
+            local inCode, sp = code, 0
+            if code >= nextCode then
+                if code > nextCode then break end
+                writeu8(stack, 0, first); sp = 1
+                code = prev
+            end
+            while code > eoi and sp < 4096 do
+                writeu8(stack, sp, readu8(suffix, code)); sp += 1
+                code = readu16(prefix, code * 2)
+            end
+            first = band(code, 255)
+            writeu8(stack, sp, first); sp += 1
+            if nextCode < 4096 then
+                writeu16(prefix, nextCode * 2, prev)
+                writeu8(suffix, nextCode, first)
+                nextCode += 1
+                if nextCode > codeMask and codeSize < 12 then
+                    codeSize += 1
+                    codeMask = lshift(1, codeSize) - 1
+                end
+            end
+            prev = inCode
+            while sp > 0 and op < outLen do
+                sp -= 1
+                writeu8(out, op, readu8(stack, sp)); op += 1
+            end
+        end
+        if pause and op >= nextPause then
+            nextPause = op + 16384
+            pause()
+        end
+    end
+    return op
+end
+
+function BG.scaleInto(dst, dw, dh, src, xmap, ymap)
+    local readu32, writeu32 = buffer.readu32, buffer.writeu32
+    local o = 0
+    for y = 1, dh do
+        local row = ymap[y]
+        for x = 1, dw do
+            writeu32(dst, o, readu32(src, row + xmap[x]))
+            o += 4
+        end
+    end
+end
+
+-- Decodes a GIF (the file contents as a string) frame by frame.
+--   opts.OnFrame(index, width, height, rgbaBuffer)  called for every kept frame;
+--       return false to stop. The buffer is reused, so copy it or encode it now.
+--   opts.TargetWidth / TargetHeight  shrink (never grow) to the smallest size
+--       that still covers this box, since nothing larger is ever shown.
+--   opts.MaxFrames  long GIFs are thinned evenly to at most this many frames.
+--   opts.Pause  optional callback called regularly so the caller can yield.
+-- Returns { width, height, outWidth, outHeight, delays (ms per kept frame),
+-- sourceFrames } or nil plus a reason.
+function BG.decodeGif(data, opts)
+    opts = opts or {}
+    local readu8, readu16, writeu32 = buffer.readu8, buffer.readu16, buffer.writeu32
+    local band, lshift, rshift = bit32.band, bit32.lshift, bit32.rshift
+    local pause = opts.Pause
+    local src = buffer.fromstring(data)
+    local len = buffer.len(src)
+    if len < 13 or buffer.readstring(src, 0, 4) ~= "GIF8" then return nil, "that file is not a GIF" end
+    local W, H = readu16(src, 6), readu16(src, 8)
+    if W < 1 or H < 1 then return nil, "the GIF has no size" end
+    local flags = readu8(src, 10)
+    local pos = 13
+    local gctPos, gctN = nil, 0
+    if band(flags, 0x80) ~= 0 then
+        gctN = lshift(1, band(flags, 7) + 1)
+        gctPos = pos
+        pos += gctN * 3
+    end
+    local total = BG.countGifFrames(src, pos)
+    if total < 1 then return nil, "the GIF has no frames" end
+    local step = math.max(1, math.ceil(total / math.max(1, tonumber(opts.MaxFrames) or 120)))
+
+    local outW, outH = W, H
+    local tw, th = tonumber(opts.TargetWidth), tonumber(opts.TargetHeight)
+    if tw and th and tw > 0 and th > 0 then
+        local s = math.max(tw / W, th / H)
+        if s < 1 then outW, outH = math.max(1, math.floor(W * s + 0.5)), math.max(1, math.floor(H * s + 0.5)) end
+    end
+    local cap = tonumber(opts.MaxSide) or 1024 -- Roblox does not show textures larger than this
+    if outW > cap or outH > cap then
+        local s = math.min(cap / outW, cap / outH)
+        outW, outH = math.max(1, math.floor(outW * s)), math.max(1, math.floor(outH * s))
+    end
+    local scaled = outW ~= W or outH ~= H
+    local xmap, ymap
+    if scaled then
+        xmap, ymap = table.create(outW), table.create(outH)
+        for x = 1, outW do xmap[x] = math.min(W - 1, math.floor((x - 0.5) * W / outW)) * 4 end
+        for y = 1, outH do ymap[y] = math.min(H - 1, math.floor((y - 0.5) * H / outH)) * W * 4 end
+    end
+
+    local size = W * H * 4
+    local canvas = buffer.create(size) -- starts fully transparent
+    local saved = nil
+    local out = scaled and buffer.create(outW * outH * 4) or canvas
+    local idx = buffer.create(W * H)
+    local prefix, suffix, stack = buffer.create(8192), buffer.create(4096), buffer.create(4100)
+    local palette = table.create(256, 0)
+    local disposal, delay, transparent = 0, 10, -1
+    local frameNo, kept, delays = 0, 0, {}
+
+    while pos < len do
+        local block = readu8(src, pos); pos += 1
+        if block == 0x3B then
+            break
+        elseif block == 0x21 then
+            if pos >= len then break end
+            local label = readu8(src, pos); pos += 1
+            if label == 0xF9 and pos + 4 < len and readu8(src, pos) >= 4 then
+                local pk = readu8(src, pos + 1)
+                disposal = band(rshift(pk, 2), 7)
+                delay = readu16(src, pos + 2)
+                transparent = band(pk, 1) == 1 and readu8(src, pos + 4) or -1
+            end
+            pos = BG.skipSubBlocks(src, pos, len)
+        elseif block == 0x2C then
+            if pos + 9 > len then break end
+            local fx, fy = readu16(src, pos), readu16(src, pos + 2)
+            local fw, fh = readu16(src, pos + 4), readu16(src, pos + 6)
+            local pk = readu8(src, pos + 8)
+            pos += 9
+            local palPos, palN = gctPos, gctN
+            if band(pk, 0x80) ~= 0 then
+                palN = lshift(1, band(pk, 7) + 1)
+                palPos = pos
+                pos += palN * 3
+            end
+            if pos >= len then break end
+            local minCode = readu8(src, pos); pos += 1
+            -- the image data comes in sub-blocks of up to 255 bytes; join them
+            local runLen, p = 0, pos
+            while p < len do
+                local n = readu8(src, p); p += 1
+                if n == 0 then break end
+                runLen += n; p += n
+            end
+            local run = buffer.create(math.max(runLen, 1))
+            local got = 0
+            while pos < len do
+                local n = readu8(src, pos); pos += 1
+                if n == 0 then break end
+                n = math.min(n, len - pos)
+                if n <= 0 then break end
+                buffer.copy(run, got, src, pos, n)
+                got += n; pos += n
+            end
+
+            if disposal == 3 then
+                saved = saved or buffer.create(size)
+                buffer.copy(saved, 0, canvas, 0, size)
+            end
+            local pixels = fw * fh
+            if pixels > 0 and minCode >= 1 and minCode <= 8 and palPos then
+                if buffer.len(idx) < pixels then idx = buffer.create(pixels) end
+                local count = BG.lzw(run, got, minCode, idx, pixels, prefix, suffix, stack, pause)
+                for i = 0, palN - 1 do
+                    local pp = palPos + i * 3
+                    if pp + 2 < len then
+                        palette[i + 1] = readu8(src, pp) + readu8(src, pp + 1) * 256 + readu8(src, pp + 2) * 65536 + 4278190080
+                    else
+                        palette[i + 1] = 4278190080
+                    end
+                end
+                local rows = band(pk, 0x40) ~= 0 and BG.interlaceRows(fh) or nil
+                local visible = math.min(fw, W - fx)
+                for r = 0, fh - 1 do
+                    local rowStart = r * fw
+                    if rowStart >= count then break end
+                    local cy = fy + (rows and rows[r + 1] or r)
+                    if cy < H then
+                        local base = (cy * W + fx) * 4
+                        for x = 0, math.min(visible, count - rowStart) - 1 do
+                            local ci = readu8(idx, rowStart + x)
+                            if ci ~= transparent and ci < palN then
+                                writeu32(canvas, base + x * 4, palette[ci + 1])
+                            end
+                        end
+                    end
+                end
+            end
+
+            frameNo += 1
+            if (frameNo - 1) % step == 0 then
+                kept += 1
+                delays[kept] = 0
+                if scaled then BG.scaleInto(out, outW, outH, canvas, xmap, ymap) end
+                if opts.OnFrame and opts.OnFrame(kept, outW, outH, out) == false then
+                    return nil, "a frame could not be saved"
+                end
+                if pause then pause() end
+            end
+            -- browsers play delays of 0 or 1 hundredths as 10, so match them
+            delays[kept] += (delay <= 1 and 10 or delay) * 10
+
+            if disposal == 2 then
+                local x0, x1 = math.max(fx, 0), math.min(fx + fw, W)
+                if x1 > x0 then
+                    for y = fy, math.min(fy + fh, H) - 1 do
+                        buffer.fill(canvas, (y * W + x0) * 4, 0, (x1 - x0) * 4)
+                    end
+                end
+            elseif disposal == 3 and saved then
+                buffer.copy(canvas, 0, saved, 0, size)
+            end
+            disposal, delay, transparent = 0, 10, -1
+        else
+            break
+        end
+    end
+    if kept == 0 then return nil, "the GIF has no frames" end
+    return { width = W, height = H, outWidth = outW, outHeight = outH, delays = delays, sourceFrames = frameNo }
+end
+
+-- ── Loading a background source ───────────────────────────────────────────
+function BG.fileExists(path)
+    if type(isfile) ~= "function" then return false end
+    local ok, yes = pcall(isfile, path)
+    return ok and yes == true
+end
+function BG.folderExists(path)
+    if type(isfolder) ~= "function" then return false end
+    local ok, yes = pcall(isfolder, path)
+    return ok and yes == true
+end
+function BG.makeFolders(path)
+    if type(makefolder) ~= "function" then return end
+    local built = ""
+    for _, part in ipairs(string.split(path, "/")) do
+        if part ~= "" then
+            built = (built == "") and part or (built .. "/" .. part)
+            if not BG.folderExists(built) then pcall(makefolder, built) end
+        end
+    end
+end
+function BG.customAsset(path)
+    local load = getcustomasset or getsynasset
+    if type(load) ~= "function" then
+        return nil, "this executor has no getcustomasset, so only rbxassetid backgrounds work"
+    end
+    local ok, id = pcall(load, path)
+    if not ok or type(id) ~= "string" or id == "" then return nil, "could not load " .. tostring(path) end
+    return id
+end
+
+-- FNV-1a over (a sample of) the bytes, plus the length. Names the cache folder.
+function BG.hash(data)
+    local h, n = 2166136261, #data
+    local stride = math.max(1, math.floor(n / 262144))
+    local byte, bxor, lshift = string.byte, bit32.bxor, bit32.lshift
+    for i = 1, n, stride do
+        h = bxor(h, byte(data, i))
+        h = (lshift(h, 24) + h * 403) % 4294967296 -- * 16777619, kept exact in 32 bits
+    end
+    return string.format("%08x%x", h, n)
+end
+
+function BG.sniff(data)
+    if string.sub(data, 1, 4) == "GIF8" then return "gif" end
+    if string.sub(data, 1, 8) == "\137PNG\r\n\26\n" then return "png" end
+    if string.sub(data, 1, 3) == "\255\216\255" then return "jpg" end
+    return nil
+end
+
+function BG.evenDelays(n, settings)
+    local ms = 1000 / math.clamp(tonumber(settings.FPS) or 15, 1, 60)
+    local out = table.create(n)
+    for i = 1, n do out[i] = ms end
+    return out
+end
+
+-- One still image: an asset id, or a file path for getcustomasset.
+function BG.still(value, folder)
+    if type(value) == "number" then return "rbxassetid://" .. math.floor(value) end
+    local text = tostring(value)
+    if string.match(text, "^rbxasset") or string.match(text, "^rbxthumb://") then return text end
+    if string.match(text, "^%d+$") then return "rbxassetid://" .. text end
+    local path = string.gsub(text, "\\", "/")
+    if not BG.fileExists(path) and BG.fileExists(folder .. "/" .. path) then path = folder .. "/" .. path end
+    return BG.customAsset(path)
+end
+
+-- A folder of numbered PNG/JPG frames (e.g. split from a GIF with ezgif).
+function BG.folderFrames(path, settings)
+    if type(listfiles) ~= "function" then return nil, "this executor has no listfiles" end
+    local ok, files = pcall(listfiles, path)
+    if not ok or type(files) ~= "table" then return nil, "could not read the folder " .. path end
+    local list = {}
+    for _, file in ipairs(files) do
+        file = string.gsub(tostring(file), "\\", "/")
+        local lower = string.lower(file)
+        if string.match(lower, "%.png$") or string.match(lower, "%.jpe?g$") then
+            local name = string.match(file, "([^/]+)$") or file
+            table.insert(list, { path = file, name = name, n = tonumber(string.match(name, "(%d+)")) or math.huge })
+        end
+    end
+    if #list == 0 then return nil, "no .png or .jpg frames in " .. path end
+    table.sort(list, function(a, b)
+        if a.n ~= b.n then return a.n < b.n end
+        return a.name < b.name
+    end)
+    local ids = {}
+    for i, entry in ipairs(list) do
+        local id, err = BG.customAsset(entry.path)
+        if not id then return nil, err end
+        ids[i] = id
+    end
+    return { kind = #ids > 1 and "frames" or "image", ids = ids, delays = BG.evenDelays(#ids, settings) }
+end
+
+function BG.gifFrames(data, folder, settings, target, status)
+    if type(buffer) ~= "table" then return nil, "this executor is too old to read GIFs (no buffer library)" end
+    if type(writefile) ~= "function" or type(readfile) ~= "function" then
+        return nil, "GIF backgrounds need readfile and writefile to store their frames"
+    end
+    local maxFrames = math.clamp(math.floor(tonumber(settings.MaxFrames) or 120), 1, 400)
+    local key = string.format("%s_%dx%d_%d_v%d", BG.hash(data), target.X, target.Y, maxFrames, BG.CACHE_VERSION)
+    local dir = folder .. "/cache/" .. key
+    local metaPath = dir .. "/frames.json"
+    local meta
+    if BG.fileExists(metaPath) then
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(readfile(metaPath)) end)
+        if ok and type(decoded) == "table" and type(decoded.delays) == "table" and #decoded.delays > 0
+            and BG.fileExists(dir .. "/" .. #decoded.delays .. ".png") then
+            meta = decoded
+        end
+    end
+    if not meta then
+        status("converting")
+        BG.makeFolders(dir)
+        local last = os.clock()
+        local function pause()
+            if os.clock() - last > 0.012 then task.wait(); last = os.clock() end
+        end
+        local info, err = BG.decodeGif(data, {
+            TargetWidth = target.X, TargetHeight = target.Y, MaxFrames = maxFrames, Pause = pause,
+            OnFrame = function(i, w, h, px)
+                return (pcall(writefile, dir .. "/" .. i .. ".png", BG.encodePng(w, h, px, pause)))
+            end,
+        })
+        if not info then return nil, err end
+        meta = {
+            delays = info.delays, width = info.outWidth, height = info.outHeight,
+            sourceWidth = info.width, sourceHeight = info.height, sourceFrames = info.sourceFrames,
+        }
+        pcall(writefile, metaPath, HttpService:JSONEncode(meta))
+    end
+    local ids = {}
+    for i = 1, #meta.delays do
+        local id, err = BG.customAsset(dir .. "/" .. i .. ".png")
+        if not id then return nil, err end
+        ids[i] = id
+    end
+    return {
+        kind = #ids > 1 and "gif" or "image", ids = ids, delays = meta.delays,
+        width = meta.width, height = meta.height,
+        sourceWidth = meta.sourceWidth, sourceHeight = meta.sourceHeight,
+    }
+end
+
+-- Turns whatever the caller passed into a list of image ids (+ frame delays).
+function BG.resolve(source, settings, target, status)
+    local folder = string.gsub(tostring(Library.BackgroundFolder or "Oxidelib/backgrounds"), "/+$", "")
+    if type(source) == "number" then return { kind = "image", ids = { "rbxassetid://" .. math.floor(source) } } end
+    if type(source) == "table" then
+        local ids = {}
+        for _, value in ipairs(source) do
+            local id, err = BG.still(value, folder)
+            if not id then return nil, err end
+            table.insert(ids, id)
+        end
+        if #ids == 0 then return nil, "the frame list is empty" end
+        return { kind = #ids > 1 and "frames" or "image", ids = ids, delays = BG.evenDelays(#ids, settings) }
+    end
+
+    local text = string.match(tostring(source), "^%s*(.-)%s*$")
+    if string.match(text, "^rbxasset") or string.match(text, "^rbxthumb://") then return { kind = "image", ids = { text } } end
+    if string.match(text, "^%d+$") then return { kind = "image", ids = { "rbxassetid://" .. text } } end
+
+    local data
+    if string.match(text, "^https?://") then
+        status("downloading")
+        local ok, body = pcall(function() return game:HttpGet(text) end)
+        if not ok or type(body) ~= "string" or body == "" then return nil, "could not download " .. text end
+        data = body
+    else
+        local path = string.gsub(text, "\\", "/")
+        if not BG.fileExists(path) and not BG.folderExists(path) then
+            local inFolder = folder .. "/" .. path
+            if BG.fileExists(inFolder) or BG.folderExists(inFolder) then path = inFolder end
+        end
+        if BG.folderExists(path) then return BG.folderFrames(path, settings) end
+        if not BG.fileExists(path) then
+            return nil, "no file called " .. text .. " (looked in your workspace and in " .. folder .. ")"
+        end
+        local ext = string.lower(string.match(path, "%.(%w+)$") or "")
+        if ext == "png" or ext == "jpg" or ext == "jpeg" then
+            local id, err = BG.customAsset(path)
+            if not id then return nil, err end
+            return { kind = "image", ids = { id } }
+        end
+        local ok, body = pcall(readfile, path)
+        if not ok or type(body) ~= "string" or body == "" then return nil, "could not read " .. path end
+        data = body
+    end
+
+    local kind = BG.sniff(data)
+    if kind == "gif" then return BG.gifFrames(data, folder, settings, target, status) end
+    if kind == "png" or kind == "jpg" then
+        -- a downloaded picture has to be on disk before getcustomasset can use it
+        if type(writefile) ~= "function" then return nil, "downloaded backgrounds need writefile" end
+        BG.makeFolders(folder .. "/cache")
+        local path = folder .. "/cache/" .. BG.hash(data) .. "." .. kind
+        if not BG.fileExists(path) and not pcall(writefile, path, data) then
+            return nil, "could not save the downloaded picture"
+        end
+        local id, err = BG.customAsset(path)
+        if not id then return nil, err end
+        return { kind = "image", ids = { id } }
+    end
+    if string.match(data, "^%s*<") then
+        return nil, "that link is a web page, not a picture - open the GIF by itself and copy that link (it should end in .gif)"
+    end
+    return nil, "only .gif, .png and .jpg backgrounds work"
+end
+
+-- ── Drawing it ────────────────────────────────────────────────────────────
+function BG.state(win)
+    local bg = win._bg
+    if not bg then
+        bg = {
+            token = 0, dim = 0.45, cards = 0.25, speed = 1, status = "off",
+            orig = setmetatable({}, { __mode = "k" }),
+        }
+        win._bg = bg
+    end
+    return bg
+end
+
+function BG.untrack(win, conn)
+    local list = win._connections
+    local i = list and table.find(list, conn)
+    if i then table.remove(list, i) end
+end
+
+-- Sets a transparency while keeping the drag fade's saved copy in step, so the
+-- fade does not put back an old value when the drag ends.
+function BG.setProp(win, inst, prop, value)
+    local rec = win._fadeOrig and win._fadeOrig[inst]
+    if rec and rec[prop] ~= nil then
+        rec[prop] = value
+        if win._isInnerHidden and win._isInnerHidden() then return end
+    end
+    inst[prop] = value
+end
+
+function BG.designValue(win, inst, prop)
+    if win._isInnerHidden and win._isInnerHidden() then
+        local rec = win._fadeOrig and win._fadeOrig[inst]
+        if rec and rec[prop] ~= nil then return rec[prop] end
+    end
+    return inst[prop]
+end
+
+-- What the glass pass wants for an instance: cards go see-through by the card
+-- setting, and anything painted in the window colour (idle sub-tab pills) was
+-- only there to blend with the window, so it goes fully clear.
+function BG.glassWant(win, inst)
+    local bg = win._bg
+    if inst == win._brand then return bg.cards end
+    local key = inst:GetAttribute("Theme_BackgroundColor3")
+    if key == "CardBg" or key == "HotbarBg" then return bg.cards end
+    if key == "WindowBg" then return 1 end
+    return nil
+end
+
+function BG.glassOne(win, inst)
+    local bg = win._bg
+    if not (bg and bg.glass) or not inst:IsA("GuiObject") then return end
+    if bg.layer and (inst == bg.layer or inst:IsDescendantOf(bg.layer)) then return end
+    local want = BG.glassWant(win, inst)
+    local base = bg.orig[inst]
+    if want == nil then
+        if base ~= nil then
+            bg.orig[inst] = nil
+            BG.setProp(win, inst, "BackgroundTransparency", base)
+        end
+        return
+    end
+    if base == nil then
+        base = BG.designValue(win, inst, "BackgroundTransparency")
+        if base >= 1 then return end
+        bg.orig[inst] = base
+    end
+    BG.setProp(win, inst, "BackgroundTransparency", math.max(base, want))
+end
+
+-- The sidebar logo's outline glow is cut out by a copy of the logo in the
+-- window colour. Over a picture that copy would show as a solid blob, so it
+-- takes the dim layer's strength and the glow keeps running around the rim.
+function BG.glassMask(win)
+    local bg = win._bg
+    local mask = win._sidebar and win._sidebar:FindFirstChild("WatermarkMask", true)
+    if mask then BG.setProp(win, mask, "ImageTransparency", (bg and bg.glass) and (1 - bg.dim) or 0) end
+end
+
+function BG.setGlass(win, on)
+    local bg = BG.state(win)
+    if on then
+        bg.glass = true
+        for _, d in ipairs(win.Main:GetDescendants()) do BG.glassOne(win, d) end
+        if not bg.addConn then
+            bg.addConn = win.Main.DescendantAdded:Connect(function(d)
+                task.defer(function() if d.Parent then BG.glassOne(win, d) end end)
+            end)
+            trackConn(win, bg.addConn)
+        end
+    else
+        bg.glass = false
+        if bg.addConn then
+            bg.addConn:Disconnect(); BG.untrack(win, bg.addConn); bg.addConn = nil
+        end
+        for inst, base in pairs(bg.orig) do
+            if inst.Parent then BG.setProp(win, inst, "BackgroundTransparency", base) end
+        end
+        table.clear(bg.orig)
+    end
+    BG.glassMask(win)
+end
+
+function BG.onPaint(inst)
+    for _, win in ipairs(Library._windowObjects) do
+        local bg = win._bg
+        if bg and bg.glass and win.Main and inst:IsDescendantOf(win.Main) then
+            BG.glassOne(win, inst)
+            return
+        end
+    end
+end
+
+function BG.clear(win)
+    local bg = win._bg
+    if not bg then return end
+    if bg.animConn then
+        bg.animConn:Disconnect(); BG.untrack(win, bg.animConn); bg.animConn = nil
+    end
+    if bg.layer then bg.layer:Destroy() end
+    bg.layer, bg.tint, bg.labels, bg.delays, bg.ready = nil, nil, nil, nil, false
+end
+
+function BG.step(win, dt)
+    local bg = win._bg
+    local labels = bg and bg.labels
+    if not (labels and bg.ready) or #labels < 2 then return end
+    if not win.Main.Visible or not win.ScreenGui.Enabled or win._uiVisible == false then return end
+    local delays, n = bg.delays, #labels
+    bg.clock += dt * 1000 * bg.speed
+    local cur, guard = bg.index, 0
+    while bg.clock >= (delays[cur] or 100) and guard < n do
+        bg.clock -= (delays[cur] or 100)
+        cur = cur % n + 1
+        guard += 1
+    end
+    if guard >= n then bg.clock = 0 end
+    if cur ~= bg.index then
+        labels[bg.index].Visible = false
+        labels[cur].Visible = true
+        bg.index = cur
+    end
+end
+
+function BG.show(win, result)
+    local bg = BG.state(win)
+    BG.clear(win)
+    -- ZIndex 0 under the sidebar and content (1); the window's outline glow is
+    -- a stroke on Main itself, so it stays on top.
+    local layer = make("Frame", { Name = "OxidelibBackground", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = win.Main })
+    local labels = {}
+    for i, id in ipairs(result.ids) do
+        -- Crop fills the whole window and trims whatever does not fit; the corner
+        -- matches Main's, since ClipsDescendants does not follow rounded corners.
+        local img = make("ImageLabel", {
+            Name = "Frame" .. i, Image = id, ScaleType = Enum.ScaleType.Crop,
+            BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
+            Visible = i == 1, ZIndex = 1, Parent = layer,
+        })
+        corner(img, 12)
+        labels[i] = img
+    end
+    local tint = make("Frame", { Name = "Dim", Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.WindowBg, BackgroundTransparency = 1 - bg.dim, ZIndex = 2, Parent = layer })
+    tint:SetAttribute("Theme_BackgroundColor3", "WindowBg")
+    corner(tint, 12)
+    bg.layer, bg.tint, bg.labels, bg.delays = layer, tint, labels, result.delays
+    bg.index, bg.clock, bg.ready = 1, 0, #labels < 2
+    BG.setGlass(win, true)
+    if #labels > 1 then
+        bg.animConn = RunService.RenderStepped:Connect(function(dt) BG.step(win, dt) end)
+        trackConn(win, bg.animConn)
+        -- hold on the first frame until every frame is loaded, or the first loop flickers
+        task.spawn(function()
+            pcall(function() game:GetService("ContentProvider"):PreloadAsync(labels) end)
+            if bg.labels == labels then bg.ready = true end
+        end)
+    end
+end
+
+-- Window:SetBackground(source, settings) -> true, info | false, reason
+--   source: a file in your executor workspace or in Library.BackgroundFolder
+--           ("bg.gif", "bg.png"), a folder of numbered frames, a direct link to
+--           a .gif/.png/.jpg, an rbxassetid (string or number), a list of
+--           frames, or nil / "" to remove the background.
+--   settings (all optional, and they stick for later calls):
+--     Dim              0..1  how much of the window colour sits over the picture (0.45)
+--     CardTransparency 0..1  how see-through the cards get (0.25)
+--     Speed            GIF speed multiplier (1)
+--     MaxFrames        long GIFs are thinned to this many frames (120)
+--     FPS              playback rate for frame folders and frame lists (15)
+--     OnStatus(text)   "loading", "downloading", "converting", "ready", "failed"
+-- Yields while it downloads or converts, so call it from a spawned thread if
+-- that matters. The first load of a GIF converts it; later loads use the cache.
+function Window:SetBackground(source, settings)
+    local bg = BG.state(self)
+    settings = settings or {}
+    if settings.Dim ~= nil then bg.dim = math.clamp(tonumber(settings.Dim) or bg.dim, 0, 1) end
+    if settings.CardTransparency ~= nil then bg.cards = math.clamp(tonumber(settings.CardTransparency) or bg.cards, 0, 1) end
+    if settings.Speed ~= nil then bg.speed = math.clamp(tonumber(settings.Speed) or bg.speed, 0, 10) end
+    bg.token += 1
+    local token = bg.token
+    local function status(text)
+        bg.status = text
+        if typeof(settings.OnStatus) == "function" then task.spawn(settings.OnStatus, text) end
+    end
+    if source == nil or source == false or source == "" then
+        BG.clear(self)
+        BG.setGlass(self, false)
+        bg.source, bg.info = nil, nil
+        status("off")
+        return true
+    end
+    status("loading")
+    local mainSize = self.Main.Size
+    local tw, th = mainSize.X.Offset, mainSize.Y.Offset
+    if tw < 2 or th < 2 then tw, th = self.Main.AbsoluteSize.X, self.Main.AbsoluteSize.Y end
+    local target = Vector2.new(math.max(1, math.floor(tw)), math.max(1, math.floor(th)))
+    local ok, result, err = pcall(BG.resolve, source, settings, target, status)
+    if not ok then result, err = nil, tostring(result) end
+    if token ~= bg.token or self._destroyed then return false, "a newer background replaced this one" end
+    if not result then
+        status("failed")
+        return false, err
+    end
+    BG.show(self, result)
+    bg.source, bg.info = source, result
+    status("ready")
+    return true, result
+end
+
+function Window:ClearBackground() return self:SetBackground(nil) end
+
+function Window:SetBackgroundDim(v)
+    local bg = BG.state(self)
+    bg.dim = math.clamp(tonumber(v) or bg.dim, 0, 1)
+    if bg.tint then bg.tint.BackgroundTransparency = 1 - bg.dim end
+    BG.glassMask(self)
+    return bg.dim
+end
+
+function Window:SetBackgroundCardTransparency(v)
+    local bg = BG.state(self)
+    bg.cards = math.clamp(tonumber(v) or bg.cards, 0, 1)
+    if bg.glass then
+        for inst in pairs(bg.orig) do BG.glassOne(self, inst) end
+    end
+    return bg.cards
+end
+
+function Window:SetBackgroundSpeed(v)
+    local bg = BG.state(self)
+    bg.speed = math.clamp(tonumber(v) or bg.speed, 0, 10)
+    return bg.speed
+end
+
+-- status is "off", "loading", "downloading", "converting", "ready" or "failed";
+-- info has kind, frame count and the picture's size once it is ready.
+function Window:GetBackgroundStatus()
+    local bg = BG.state(self)
+    local info = bg.info and {
+        kind = bg.info.kind, frames = #bg.info.ids,
+        width = bg.info.width, height = bg.info.height,
+        sourceWidth = bg.info.sourceWidth, sourceHeight = bg.info.sourceHeight,
+    } or nil
+    return bg.status, info
+end
+
+function Library:SetBackground(source, settings)
+    for index = #Library._windowObjects, 1, -1 do
+        local window = Library._windowObjects[index]
+        if window and window.ScreenGui and window.ScreenGui.Parent then
+            return window:SetBackground(source, settings)
+        end
+    end
+    return false, "create a window before calling Library:SetBackground"
 end
 
 -- ════════════════════════════════════════════════════════════════════════════
