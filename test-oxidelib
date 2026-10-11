@@ -2908,7 +2908,7 @@ function BG.step(win, dt)
         bg.index = cur
         local id = bg.ids and bg.ids[cur]
         for _, entry in ipairs(bg.hosts) do
-            if entry.img then entry.img.Image = id end
+            for _, img in ipairs(entry.imgs or {}) do img.Image = id end
         end
     end
 end
@@ -3051,21 +3051,38 @@ function BG.makeMirror(win, entry)
         local base = make("Frame", { Name = "Base", BackgroundColor3 = C[dimKey], Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = group })
         base:SetAttribute("Theme_BackgroundColor3", dimKey)
     end
-    local img = make("ImageLabel", {
-        Name = "Picture", Image = bg.ids[bg.index or 1] or bg.ids[1], BackgroundTransparency = 1,
-        ScaleType = Enum.ScaleType.Crop, Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = group,
-    })
+    local function picture(name)
+        return make("ImageLabel", {
+            Name = name, Image = bg.ids[bg.index or 1] or bg.ids[1], BackgroundTransparency = 1,
+            ScaleType = Enum.ScaleType.Crop, Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = group,
+        })
+    end
+    local img = picture("Picture")
+    local imgs = { img }
+    local tw, th = BG.textureSize(bg.shown)
     if reflect then
         -- window sized and lined up with the window, so the bar shows the
-        -- strip just above it, mirrored at the window's bottom edge
+        -- strip just above it, mirrored at the window's bottom edge. The bar
+        -- is wider than the window, so copies turned the other way sit left
+        -- and right of it and the picture carries on to the bar's ends.
         local size = win.Main.Size
-        img.AnchorPoint = Vector2.new(0.5, 0)
-        img.Size = UDim2.fromOffset(size.X.Offset, size.Y.Offset)
-        img.Position = UDim2.new(0.5, 0, 0, -(host.Position.Y.Offset - size.Y.Offset))
-        img.ScaleType = BG.SCALES[bg.scale] or Enum.ScaleType.Crop
-    end
-    if reflect or opts.Flip then
-        local tw, th = BG.textureSize(bg.shown)
+        local w, top = size.X.Offset, -(host.Position.Y.Offset - size.Y.Offset)
+        for side = -1, 1 do
+            local each = side == 0 and img or picture("PictureSide")
+            each.AnchorPoint = Vector2.new(0.5, 0)
+            each.Size = UDim2.fromOffset(w, size.Y.Offset)
+            each.Position = UDim2.new(0.5, side * w, 0, top)
+            each.ScaleType = BG.SCALES[bg.scale] or Enum.ScaleType.Crop
+            if tw then
+                local across = side ~= 0
+                each.ImageRectOffset = Vector2.new(across and tw or 0, th)
+                each.ImageRectSize = Vector2.new(across and -tw or tw, -th)
+            else
+                each.Rotation = 180
+            end
+            if side ~= 0 then table.insert(imgs, each) end
+        end
+    elseif opts.Flip then
         if tw then
             img.ImageRectOffset = Vector2.new(0, th)
             img.ImageRectSize = Vector2.new(tw, -th)
@@ -3076,7 +3093,7 @@ function BG.makeMirror(win, entry)
     local dim = make("Frame", { Name = "Dim", BackgroundColor3 = C[dimKey], Size = UDim2.fromScale(1, 1), ZIndex = 3, Parent = group })
     dim:SetAttribute("Theme_BackgroundColor3", dimKey)
     entry.fade = make("UIGradient", { Rotation = 90, Parent = dim })
-    entry.group, entry.img, entry.conns = group, img, {}
+    entry.group, entry.img, entry.imgs, entry.conns = group, img, imgs, {}
     if reflect then
         for _, prop in ipairs({ "AbsoluteSize", "Position", "Visible" }) do
             table.insert(entry.conns, host:GetPropertyChangedSignal(prop):Connect(function()
@@ -3094,7 +3111,7 @@ function BG.mirrorsOff(win)
     for _, entry in ipairs(bg.hosts or {}) do
         for _, c in ipairs(entry.conns or {}) do c:Disconnect() end
         if entry.group then entry.group:Destroy() end
-        entry.group, entry.img, entry.fade, entry.conns = nil, nil, nil, nil
+        entry.group, entry.img, entry.imgs, entry.fade, entry.conns = nil, nil, nil, nil, nil
     end
     bg.mirrored = false
 end
@@ -3278,8 +3295,9 @@ function Window:SetBackgroundScale(v)
     local bg = BG.state(self)
     bg.scale = BG.scaleMode(v) or bg.scale
     for _, img in ipairs(bg.labels or {}) do img.ScaleType = BG.SCALES[bg.scale] end
-    local reflection = bg.hotbarEntry and bg.hotbarEntry.img
-    if reflection then reflection.ScaleType = BG.SCALES[bg.scale] end
+    for _, img in ipairs(bg.hotbarEntry and bg.hotbarEntry.imgs or {}) do
+        img.ScaleType = BG.SCALES[bg.scale]
+    end
     return bg.scale
 end
 
@@ -3328,7 +3346,7 @@ function Window:AddBackgroundMirror(host, opts)
         local i = table.find(bg.hosts, entry)
         if i then table.remove(bg.hosts, i) end
         if entry.group then entry.group:Destroy() end
-        entry.group, entry.img, entry.fade = nil, nil, nil
+        entry.group, entry.img, entry.imgs, entry.fade = nil, nil, nil, nil
     end
 end
 
