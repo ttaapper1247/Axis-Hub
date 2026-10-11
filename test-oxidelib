@@ -2439,7 +2439,7 @@ end
 function BG.customAsset(path)
     local load = getcustomasset or getsynasset
     if type(load) ~= "function" then
-        return nil, "this executor has no getcustomasset, so only rbxassetid backgrounds work"
+        return nil, "your executor has no getcustomasset, so only rbxassetid works"
     end
     local ok, id = pcall(load, path)
     if not ok or type(id) ~= "string" or id == "" then return nil, "could not load " .. tostring(path) end
@@ -2485,7 +2485,7 @@ end
 
 -- A folder of numbered PNG/JPG frames (e.g. split from a GIF with ezgif).
 function BG.folderFrames(path, settings)
-    if type(listfiles) ~= "function" then return nil, "this executor has no listfiles" end
+    if type(listfiles) ~= "function" then return nil, "your executor has no listfiles" end
     local ok, files = pcall(listfiles, path)
     if not ok or type(files) ~= "table" then return nil, "could not read the folder " .. path end
     local list = {}
@@ -2511,10 +2511,10 @@ function BG.folderFrames(path, settings)
     return { kind = #ids > 1 and "frames" or "image", ids = ids, delays = BG.evenDelays(#ids, settings) }
 end
 
-function BG.gifFrames(data, folder, settings, target, status)
-    if type(buffer) ~= "table" then return nil, "this executor is too old to read GIFs (no buffer library)" end
+function BG.gifFrames(data, folder, settings, target, status, alive)
+    if type(buffer) ~= "table" then return nil, "your executor is too old to read GIFs" end
     if type(writefile) ~= "function" or type(readfile) ~= "function" then
-        return nil, "GIF backgrounds need readfile and writefile to store their frames"
+        return nil, "your executor can't save files, so GIFs won't work"
     end
     local maxFrames = math.clamp(math.floor(tonumber(settings.MaxFrames) or 120), 1, 400)
     local key = string.format("%s_%dx%d_%d_v%d", BG.hash(data), target.X, target.Y, maxFrames, BG.CACHE_VERSION)
@@ -2533,7 +2533,11 @@ function BG.gifFrames(data, folder, settings, target, status)
         BG.makeFolders(dir)
         local last = os.clock()
         local function pause()
-            if os.clock() - last > 0.012 then task.wait(); last = os.clock() end
+            if os.clock() - last > 0.012 then
+                task.wait(); last = os.clock()
+                -- a newer background was picked, so stop converting this one
+                if alive and not alive() then error("replaced", 0) end
+            end
         end
         local info, err = BG.decodeGif(data, {
             TargetWidth = target.X, TargetHeight = target.Y, MaxFrames = maxFrames, Pause = pause,
@@ -2615,24 +2619,24 @@ function BG.download(url, discord, folder)
     end
     local expired = string.find(sample, "no longer available", 1, true) or code == 403 or code == 404
     if discord and (expired or string.find(tostring(err), "40[34]")) then
-        return nil, "that Discord link has expired (they last about a day) - copy the link again from Discord. Once it loads it is saved and keeps working"
+        return nil, "the Discord link expired - copy it from Discord again"
     end
     if damaged then
-        return nil, "the download came back damaged (this executor's HTTP breaks binary files) - save the GIF into " .. folder .. " and type its name instead"
+        return nil, "your executor broke the download - save the GIF in " .. folder .. " and type its name"
     end
-    if expired then return nil, "the link answered " .. (code or 404) .. " - the file is gone or the link is wrong" end
+    if expired then return nil, "the link is dead (" .. (code or 404) .. ")" end
     if string.sub(sample, 1, 4) == "RIFF" and string.sub(sample, 9, 12) == "WEBP" then
-        return nil, "that link gives a WEBP image - save it as a .gif (ezgif.com/webp-to-gif) and use that"
+        return nil, "that link is a WEBP - turn it into a GIF first (ezgif.com/webp-to-gif)"
     end
     if string.match(sample, "^%s*<") then
-        return nil, "that link is a web page, not a picture - open the GIF by itself and copy that link (it should end in .gif)"
+        return nil, "that link is a web page - copy the link of the GIF itself"
     end
-    if code then return nil, "the link answered " .. code .. " instead of a picture" end
-    return nil, "could not download it" .. (err and (": " .. err) or "")
+    if code then return nil, "the link gave error " .. code end
+    return nil, "download failed" .. (err and (": " .. err) or "")
 end
 
 -- Turns whatever the caller passed into a list of image ids (+ frame delays).
-function BG.resolve(source, settings, target, status)
+function BG.resolve(source, settings, target, status, alive)
     local folder = string.gsub(tostring(Library.BackgroundFolder or "Oxidelib/backgrounds"), "/+$", "")
     if type(source) == "number" then return { kind = "image", ids = { "rbxassetid://" .. math.floor(source) } } end
     if type(source) == "table" then
@@ -2696,7 +2700,7 @@ function BG.resolve(source, settings, target, status)
         end
         if BG.folderExists(path) then return BG.folderFrames(path, settings) end
         if not BG.fileExists(path) then
-            return nil, "no file called " .. text .. " (looked in your workspace and in " .. folder .. ")"
+            return nil, "can't find " .. text .. " in your workspace or in " .. folder
         end
         local ext = string.lower(string.match(path, "%.(%w+)$") or "")
         if ext == "png" or ext == "jpg" or ext == "jpeg" then
@@ -2710,16 +2714,16 @@ function BG.resolve(source, settings, target, status)
     end
 
     local kind = BG.sniff(data)
-    if kind == "gif" then return BG.gifFrames(data, folder, settings, target, status) end
+    if kind == "gif" then return BG.gifFrames(data, folder, settings, target, status, alive) end
     if kind == "png" or kind == "jpg" then
         -- a downloaded picture has to be on disk before getcustomasset can use it
         local path = savedPath
         if not path then
-            if type(writefile) ~= "function" then return nil, "downloaded backgrounds need writefile" end
+            if type(writefile) ~= "function" then return nil, "your executor can't save files" end
             BG.makeFolders(folder .. "/cache")
             path = folder .. "/cache/" .. BG.hash(data) .. "." .. kind
             if not BG.fileExists(path) and not pcall(writefile, path, data) then
-                return nil, "could not save the downloaded picture"
+                return nil, "couldn't save the picture"
             end
         end
         local id, err = BG.customAsset(path)
@@ -2727,12 +2731,12 @@ function BG.resolve(source, settings, target, status)
         return { kind = "image", ids = { id } }
     end
     if string.sub(data, 1, 4) == "RIFF" and string.sub(data, 9, 12) == "WEBP" then
-        return nil, "that is a WEBP image - Roblox cannot show it. Convert it to .gif (ezgif.com/webp-to-gif) and use that"
+        return nil, "that is a WEBP - turn it into a GIF first (ezgif.com/webp-to-gif)"
     end
     if string.match(data, "^%s*<") then
-        return nil, "that link is a web page, not a picture - open the GIF by itself and copy that link (it should end in .gif)"
+        return nil, "that link is a web page - copy the link of the GIF itself"
     end
-    return nil, "only .gif, .png and .jpg backgrounds work"
+    return nil, "only GIF, PNG and JPG work"
 end
 
 -- ── Drawing it ────────────────────────────────────────────────────────────
@@ -2880,12 +2884,23 @@ function BG.step(win, dt)
     end
 end
 
+-- PreloadAsync can hang on an asset that never loads, so it gets a time limit.
+function BG.preload(list, seconds, wanted)
+    local done = false
+    task.spawn(function()
+        pcall(function() game:GetService("ContentProvider"):PreloadAsync(list) end)
+        done = true
+    end)
+    local stop = os.clock() + seconds
+    while not done and os.clock() < stop and wanted() do task.wait() end
+end
+
 function BG.show(win, result)
     local bg = BG.state(win)
     BG.clear(win)
     -- ZIndex 0 under the sidebar and content (1); the window's outline glow is
     -- a stroke on Main itself, so it stays on top.
-    local layer = make("Frame", { Name = "OxidelibBackground", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0, Parent = win.Main })
+    local layer = make("Frame", { Name = "OxidelibBackground", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, ZIndex = 0, Parent = win.Main })
     local labels = {}
     for i, id in ipairs(result.ids) do
         -- Crop fills the whole window and trims whatever does not fit; the corner
@@ -2902,17 +2917,23 @@ function BG.show(win, result)
     tint:SetAttribute("Theme_BackgroundColor3", "WindowBg")
     corner(tint, 12)
     bg.layer, bg.tint, bg.labels, bg.delays = layer, tint, labels, result.delays
-    bg.index, bg.clock, bg.ready = 1, 0, #labels < 2
-    BG.setGlass(win, true)
+    bg.index, bg.clock, bg.ready = 1, 0, false
     if #labels > 1 then
         bg.animConn = RunService.RenderStepped:Connect(function(dt) BG.step(win, dt) end)
         trackConn(win, bg.animConn)
-        -- hold on the first frame until every frame is loaded, or the first loop flickers
-        task.spawn(function()
-            pcall(function() game:GetService("ContentProvider"):PreloadAsync(labels) end)
-            if bg.labels == labels then bg.ready = true end
-        end)
     end
+    local function current() return bg.labels == labels end
+    task.spawn(function()
+        -- hidden until the first frame has loaded, so it does not pop in
+        -- half-drawn; a GIF then holds that frame until every frame is
+        -- loaded, or the first loop flickers
+        BG.preload({ labels[1] }, 3, current)
+        if not current() then return end
+        layer.Visible = true
+        BG.setGlass(win, true)
+        if #labels > 1 then BG.preload(labels, 20, current) end
+        if current() then bg.ready = true end
+    end)
 end
 
 -- Window:SetBackground(source, settings) -> true, info | false, reason
@@ -2930,6 +2951,7 @@ end
 --     OnStatus(text)   "loading", "downloading", "converting", "ready", "failed"
 -- Yields while it downloads or converts, so call it from a spawned thread if
 -- that matters. The first load of a GIF converts it; later loads use the cache.
+-- A new call removes the old background straight away and stops its conversion.
 function Window:SetBackground(source, settings)
     local bg = BG.state(self)
     settings = settings or {}
@@ -2949,12 +2971,18 @@ function Window:SetBackground(source, settings)
         status("off")
         return true
     end
+    -- the old picture goes as soon as a new one is picked, so it never stays
+    -- up while the new one downloads or converts
+    BG.clear(self)
+    BG.setGlass(self, false)
+    bg.source, bg.info = nil, nil
     status("loading")
     local mainSize = self.Main.Size
     local tw, th = mainSize.X.Offset, mainSize.Y.Offset
     if tw < 2 or th < 2 then tw, th = self.Main.AbsoluteSize.X, self.Main.AbsoluteSize.Y end
     local target = Vector2.new(math.max(1, math.floor(tw)), math.max(1, math.floor(th)))
-    local ok, result, err = pcall(BG.resolve, source, settings, target, status)
+    local function alive() return token == bg.token and not self._destroyed end
+    local ok, result, err = pcall(BG.resolve, source, settings, target, status, alive)
     if not ok then result, err = nil, tostring(result) end
     if token ~= bg.token or self._destroyed then return false, "a newer background replaced this one" end
     if not result then
