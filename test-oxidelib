@@ -2744,7 +2744,7 @@ function BG.state(win)
     local bg = win._bg
     if not bg then
         bg = {
-            token = 0, dim = 0.45, cards = 0.25, speed = 1, status = "off",
+            token = 0, dim = 0.45, cards = 0.25, speed = 1, scale = "Crop", status = "off",
             orig = setmetatable({}, { __mode = "k" }),
         }
         win._bg = bg
@@ -2884,6 +2884,19 @@ function BG.step(win, dt)
     end
 end
 
+BG.SCALES = { Crop = Enum.ScaleType.Crop, Stretch = Enum.ScaleType.Stretch, Fit = Enum.ScaleType.Fit }
+
+-- "Crop", "Stretch" or "Fit" from whatever was passed ("fill" means Crop).
+function BG.scaleMode(v)
+    if type(v) == "table" then v = v[1] end
+    v = string.lower(tostring(v or ""))
+    if v == "fill" then return "Crop" end
+    for name in pairs(BG.SCALES) do
+        if string.lower(name) == v then return name end
+    end
+    return nil
+end
+
 -- PreloadAsync can hang on an asset that never loads, so it gets a time limit.
 function BG.preload(list, seconds, wanted)
     local done = false
@@ -2903,10 +2916,11 @@ function BG.show(win, result)
     local layer = make("Frame", { Name = "OxidelibBackground", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, ZIndex = 0, Parent = win.Main })
     local labels = {}
     for i, id in ipairs(result.ids) do
-        -- Crop fills the whole window and trims whatever does not fit; the corner
-        -- matches Main's, since ClipsDescendants does not follow rounded corners.
+        -- Crop fills the window and trims the edges, Stretch fills it by
+        -- squashing, Fit shows the whole picture; the corner matches Main's,
+        -- since ClipsDescendants does not follow rounded corners.
         local img = make("ImageLabel", {
-            Name = "Frame" .. i, Image = id, ScaleType = Enum.ScaleType.Crop,
+            Name = "Frame" .. i, Image = id, ScaleType = BG.SCALES[bg.scale] or Enum.ScaleType.Crop,
             BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
             Visible = i == 1, ZIndex = 1, Parent = layer,
         })
@@ -2945,6 +2959,8 @@ end
 --     Dim              0..1  how much of the window colour sits over the picture (0.45)
 --     CardTransparency 0..1  how see-through the cards get (0.25)
 --     Speed            GIF speed multiplier (1)
+--     Scale            "Crop" fills and trims the edges, "Stretch" fills by
+--                      squashing, "Fit" shows the whole picture ("Crop")
 --     MaxFrames        long GIFs are thinned to this many frames (120)
 --     FPS              playback rate for frame folders and frame lists (15)
 --     Refresh          true downloads a link again instead of using the saved copy
@@ -2958,6 +2974,7 @@ function Window:SetBackground(source, settings)
     if settings.Dim ~= nil then bg.dim = math.clamp(tonumber(settings.Dim) or bg.dim, 0, 1) end
     if settings.CardTransparency ~= nil then bg.cards = math.clamp(tonumber(settings.CardTransparency) or bg.cards, 0, 1) end
     if settings.Speed ~= nil then bg.speed = math.clamp(tonumber(settings.Speed) or bg.speed, 0, 10) end
+    if settings.Scale ~= nil then bg.scale = BG.scaleMode(settings.Scale) or bg.scale end
     bg.token += 1
     local token = bg.token
     local function status(text)
@@ -3018,6 +3035,13 @@ function Window:SetBackgroundSpeed(v)
     local bg = BG.state(self)
     bg.speed = math.clamp(tonumber(v) or bg.speed, 0, 10)
     return bg.speed
+end
+
+function Window:SetBackgroundScale(v)
+    local bg = BG.state(self)
+    bg.scale = BG.scaleMode(v) or bg.scale
+    for _, img in ipairs(bg.labels or {}) do img.ScaleType = BG.SCALES[bg.scale] end
+    return bg.scale
 end
 
 -- status is "off", "loading", "downloading", "converting", "ready" or "failed";
