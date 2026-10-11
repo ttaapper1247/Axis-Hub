@@ -1081,7 +1081,6 @@ function Library:CreateWindow(opts)
     -- Zoom factor applied to the logo inside its clipping holder. The default
     -- asset is mostly transparent padding, so it needs a healthy zoom to read;
     -- a caller-supplied logo is assumed to be already cropped.
-    local logoZoom       = math.clamp(tonumber(opts.LogoZoom) or (logoAsset == DEFAULT_LOGO and 2.4 or 1), 1, 6)
     local windowSize     = opts.Size or UDim2.fromOffset(700, 490)
     local windowPosition = opts.Position or UDim2.fromScale(0.5, 0.5)
     local guiName        = opts.GuiName or "Oxidelib"
@@ -1308,9 +1307,6 @@ function Library:CreateWindow(opts)
     })
     mainGlowGradient:SetAttribute("ThemeGradient_Edge", "Accent")
     local mainRevealScale = make("UIScale", { Scale = loadingEnabled and 0.965 or 1, Parent = main })
-    -- Assigned further down, once the sidebar watermark exists. Driving the logo
-    -- outline from this same loop keeps it in phase with the window glow.
-    local logoGlowGradient
     local brandShimmerGradient
     local glowT = 0
     local glowConn
@@ -1322,7 +1318,6 @@ function Library:CreateWindow(opts)
         glowT = (glowT + dt * 0.35) % 1
         local offset = Vector2.new(glowT * 2 - 1, 0)
         mainGlowGradient.Offset = offset
-        if logoGlowGradient then logoGlowGradient.Offset = offset end
         if brandShimmerGradient then brandShimmerGradient.Offset = offset end
     end)
 
@@ -1469,15 +1464,8 @@ function Library:CreateWindow(opts)
         Parent = brandShimmer,
     })
     brandShimmerGradient:SetAttribute("ThemeGradient_Edge", "Accent")
-    -- The logo holder clips, and the image inside is scaled up by `logoZoom`.
-    -- This exists because the default logo asset has a lot of transparent
-    -- padding — with ScaleType.Fit the visible mark would only fill ~35% of
-    -- the box. Custom logos are usually tightly cropped, so they get no zoom
-    -- unless the caller opts in via `LogoZoom`.
-    local logoHolder = make("Frame", { Position=UDim2.fromOffset(9,9), Size=UDim2.fromOffset(46,46), BackgroundTransparency=1, ClipsDescendants=true, Parent=brand })
-    local brandLogo = make("ImageLabel",{Name="Logo",Image=logoAsset,BackgroundTransparency=1,AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromScale(logoZoom,logoZoom),ScaleType=Enum.ScaleType.Fit,Parent=logoHolder})
-    make("TextLabel",{Text=opts.Name or "Oxidelib",Font=Enum.Font.GothamBold,TextSize=13,TextColor3=C.White,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(64,16),Size=UDim2.new(1,-72,0,17),Parent=brand})
-    make("TextLabel",{Text=opts.BrandSubtitle or ("Oxidelib v"..Library.Version),Font=Enum.Font.GothamMedium,TextSize=9,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(64,35),Size=UDim2.new(1,-72,0,13),Parent=brand})
+    make("TextLabel",{Text=opts.Name or "Oxidelib",Font=Enum.Font.GothamBold,TextSize=13,TextColor3=C.White,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(14,16),Size=UDim2.new(1,-28,0,17),Parent=brand})
+    make("TextLabel",{Text=opts.BrandSubtitle or ("Oxidelib v"..Library.Version),Font=Enum.Font.GothamMedium,TextSize=9,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(14,35),Size=UDim2.new(1,-28,0,13),Parent=brand})
 
     -- Player mini-card (fills the sidebar and gives identity at a glance)
     local lp = Players.LocalPlayer
@@ -1488,81 +1476,6 @@ function Library:CreateWindow(opts)
     local avRing = stroke(avH,C.Accent); avRing.Transparency=0.4
     make("TextLabel",{Text=lp.DisplayName,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=C.White,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(52,10),Size=UDim2.new(1,-60,0,15),Parent=pcard})
     make("TextLabel",{Text="@"..lp.Name,Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(52,28),Size=UDim2.new(1,-60,0,13),Parent=pcard})
-
-    -- Faint centered logo watermark fills the otherwise empty sidebar space
-    local watermarkHolder = make("Frame",{Name="Watermark",BackgroundTransparency=1,ClipsDescendants=true,AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.new(0.5,0,0.5,24),Size=UDim2.fromOffset(156,156),ZIndex=0,Parent=sidebar})
-
-    -- ── Travelling outline around the logo silhouette ─────────────────────
-    -- UIStroke cannot trace an image's alpha (ApplyStrokeMode only covers text
-    -- or the rectangular border), so the outline is the union of copies of the
-    -- logo pushed outward in a ring. They sit inside a CanvasGroup, which
-    -- flattens the overlaps into one solid silhouette — stacking them directly
-    -- would compound their alpha into a muddy halo. An opaque
-    -- background-coloured copy on top then cuts the interior away, leaving only
-    -- the rim, and a travelling gradient band runs light along it in phase with
-    -- the window outline.
-    local logoGlowOn = opts.LogoGlow ~= false
-    local outlineGroup
-    if logoGlowOn then
-        -- The CanvasGroup is what keeps this from looking like a halo, so if the
-        -- class is unavailable the effect is dropped rather than degraded.
-        local built, group = pcall(function()
-            return make("CanvasGroup", {
-                Name = "OutlineGroup", BackgroundTransparency = 1,
-                Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = watermarkHolder,
-            })
-        end)
-        if built and group then outlineGroup = group else logoGlowOn = false end
-    end
-
-    if logoGlowOn then
-        local RING_STEPS = 16     -- at a 2.5px push this keeps the rim gap-free
-        local RING_PUSH  = 2.5    -- outline thickness in pixels
-        for i = 1, RING_STEPS do
-            local ang = (i - 1) / RING_STEPS * math.pi * 2
-            make("ImageLabel", {
-                Name = "RingStep" .. i, Image = logoAsset,
-                BackgroundTransparency = 1, ImageTransparency = 0,
-                AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.new(0.5, math.cos(ang) * RING_PUSH, 0.5, math.sin(ang) * RING_PUSH),
-                Size = UDim2.fromScale(logoZoom, logoZoom),
-                ScaleType = Enum.ScaleType.Fit, Parent = outlineGroup,
-            })
-        end
-        -- Colour and fade both come from the gradient, so the rim is accent at
-        -- rest and whitens at the crest of the band.
-        logoGlowGradient = make("UIGradient", {
-            Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0.00, C.Accent),
-                ColorSequenceKeypoint.new(0.42, C.Accent),
-                ColorSequenceKeypoint.new(0.50, Color3.fromRGB(255, 255, 255)),
-                ColorSequenceKeypoint.new(0.58, C.Accent),
-                ColorSequenceKeypoint.new(1.00, C.Accent),
-            }),
-            Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0.00, 0.88),
-                NumberSequenceKeypoint.new(0.40, 0.88),
-                NumberSequenceKeypoint.new(0.50, 0.10),
-                NumberSequenceKeypoint.new(0.60, 0.88),
-                NumberSequenceKeypoint.new(1.00, 0.88),
-            }),
-            Parent = outlineGroup,
-        })
-        logoGlowGradient:SetAttribute("ThemeGradient_Edge", "Accent")
-
-        -- Sits outside the CanvasGroup so the travelling gradient cannot tint it
-        -- and make the logo interior show up against the background.
-        local watermarkMask = make("ImageLabel", {
-            Name = "WatermarkMask", Image = logoAsset, BackgroundTransparency = 1,
-            ImageColor3 = C.WindowBg, ImageTransparency = 0,
-            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromScale(logoZoom, logoZoom),
-            ScaleType = Enum.ScaleType.Fit, ZIndex = 2, Parent = watermarkHolder,
-        })
-        watermarkMask:SetAttribute("Theme_ImageColor3", "WindowBg")
-    end
-
-    local watermark = make("ImageLabel",{Name="WatermarkImage",Image=logoAsset,BackgroundTransparency=1,ImageTransparency=0.9,AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromScale(logoZoom,logoZoom),ScaleType=Enum.ScaleType.Fit,ZIndex=3,Parent=watermarkHolder})
 
     local statusDot = make("Frame",{AnchorPoint=Vector2.new(0,0.5),Position=UDim2.new(0,16,1,-19),Size=UDim2.fromOffset(6,6),BackgroundColor3=NOTIFICATION_STYLES.success.Color,Parent=sidebar})
     circle(statusDot)
@@ -1836,7 +1749,7 @@ function Library:CreateWindow(opts)
     end)
 
     windowRef = setmetatable({
-        ScreenGui=screenGui, Main=main, Container=container, Logo=brandLogo, Watermark=watermark,
+        ScreenGui=screenGui, Main=main, Container=container,
         _logoAsset=logoAsset, _hotbar=hotbar, _hotbarInner=hotbarInner, _content=content,
         _notificationHolder=notificationHolder, _notificationOrder=0,
         _profilePanel=profilePanel, _performancePanel=performancePanel,
