@@ -2561,6 +2561,76 @@ function BG.gifFrames(data, folder, settings, target, status)
     }
 end
 
+-- Discord's media proxy re-encodes uploads and answers &format=webp with a WEBP,
+-- so attachment links are pointed at the CDN, which serves the file as uploaded.
+-- The attachment path (not the signature, which runs out after about a day)
+-- names the saved copy, so a link keeps working once it has loaded.
+function BG.linkInfo(url)
+    local host, path, query = string.match(url, "^https?://([^/%?#]+)([^%?#]*)%??([^#]*)")
+    if not host then return url, url, false end
+    host = string.lower(host)
+    if (host == "media.discordapp.net" or host == "cdn.discordapp.com") and string.match(path, "^/attachments/") then
+        local keep = {}
+        for pair in string.gmatch(query, "[^&]+") do
+            local name = string.match(pair, "^([^=]*)")
+            if name == "ex" or name == "is" or name == "hm" then table.insert(keep, pair) end
+        end
+        local fetch = "https://cdn.discordapp.com" .. path .. (#keep > 0 and ("?" .. table.concat(keep, "&")) or "")
+        return fetch, "discord:" .. path, true
+    end
+    return url, url, false
+end
+
+-- The executor's request function goes first: it reports the status code and
+-- keeps binary bodies intact on more executors than HttpGet does.
+function BG.download(url, discord, folder)
+    local replies = {}
+    local function usable(body)
+        if type(body) ~= "string" or not BG.sniff(body) then return false end
+        -- a client that decodes the body as text turns bytes >= 128 into U+FFFD
+        local _, mangled = string.gsub(string.sub(body, 1, 65536), "\239\191\189", "")
+        return mangled < 8
+    end
+    local req = (syn and syn.request) or http_request or request or (http and http.request)
+    if type(req) == "function" then
+        local ok, res = pcall(req, { Url = url, Method = "GET" })
+        if ok and type(res) == "table" then
+            local body = res.Body or res.body
+            if usable(body) then return body end
+            table.insert(replies, { code = tonumber(res.StatusCode or res.Status or res.status_code), body = body })
+        end
+    end
+    local ok, body = pcall(function() return game:HttpGet(url) end)
+    if ok and usable(body) then return body end
+    table.insert(replies, { body = ok and body or nil, err = not ok and tostring(body) or nil })
+
+    local code, sample, damaged, err = nil, "", false, nil
+    for _, reply in ipairs(replies) do
+        code = code or reply.code
+        err = err or reply.err
+        if type(reply.body) == "string" and reply.body ~= "" then
+            if BG.sniff(reply.body) then damaged = true end
+            if sample == "" then sample = string.sub(reply.body, 1, 512) end
+        end
+    end
+    local expired = string.find(sample, "no longer available", 1, true) or code == 403 or code == 404
+    if discord and (expired or string.find(tostring(err), "40[34]")) then
+        return nil, "that Discord link has expired (they last about a day) - copy the link again from Discord. Once it loads it is saved and keeps working"
+    end
+    if damaged then
+        return nil, "the download came back damaged (this executor's HTTP breaks binary files) - save the GIF into " .. folder .. " and type its name instead"
+    end
+    if expired then return nil, "the link answered " .. (code or 404) .. " - the file is gone or the link is wrong" end
+    if string.sub(sample, 1, 4) == "RIFF" and string.sub(sample, 9, 12) == "WEBP" then
+        return nil, "that link gives a WEBP image - save it as a .gif (ezgif.com/webp-to-gif) and use that"
+    end
+    if string.match(sample, "^%s*<") then
+        return nil, "that link is a web page, not a picture - open the GIF by itself and copy that link (it should end in .gif)"
+    end
+    if code then return nil, "the link answered " .. code .. " instead of a picture" end
+    return nil, "could not download it" .. (err and (": " .. err) or "")
+end
+
 -- Turns whatever the caller passed into a list of image ids (+ frame delays).
 function BG.resolve(source, settings, target, status)
     local folder = string.gsub(tostring(Library.BackgroundFolder or "Oxidelib/backgrounds"), "/+$", "")
@@ -2580,12 +2650,44 @@ function BG.resolve(source, settings, target, status)
     if string.match(text, "^rbxasset") or string.match(text, "^rbxthumb://") then return { kind = "image", ids = { text } } end
     if string.match(text, "^%d+$") then return { kind = "image", ids = { "rbxassetid://" .. text } } end
 
-    local data
+    local data, savedPath
     if string.match(text, "^https?://") then
-        status("downloading")
-        local ok, body = pcall(function() return game:HttpGet(text) end)
-        if not ok or type(body) ~= "string" or body == "" then return nil, "could not download " .. text end
-        data = body
+        -- links are saved the first time, so they load offline and outlive
+        -- expiring links; settings.Refresh downloads the link again
+        local fetchUrl, key, discord = BG.linkInfo(text)
+        local stem = folder .. "/cache/url_" .. BG.hash(key)
+        local function readSaved()
+            for _, ext in ipairs({ "gif", "png", "jpg" }) do
+                local path = stem .. "." .. ext
+                if BG.fileExists(path) then
+                    local ok, body = pcall(readfile, path)
+                    if ok and type(body) == "string" and BG.sniff(body) == ext then return body, path end
+                end
+            end
+            return nil
+        end
+        if not settings.Refresh then data, savedPath = readSaved() end
+        if not data then
+            status("downloading")
+            local body, err = BG.download(fetchUrl, discord, folder)
+            if body then
+                data = body
+                if type(writefile) == "function" then
+                    BG.makeFolders(folder .. "/cache")
+                    local kind = BG.sniff(body)
+                    for _, ext in ipairs({ "gif", "png", "jpg" }) do
+                        if ext ~= kind and BG.fileExists(stem .. "." .. ext) and type(delfile) == "function" then
+                            pcall(delfile, stem .. "." .. ext)
+                        end
+                    end
+                    if pcall(writefile, stem .. "." .. kind, body) then savedPath = stem .. "." .. kind end
+                end
+            else
+                -- the link stopped working, but the copy from last time is still good
+                data, savedPath = readSaved()
+                if not data then return nil, err end
+            end
+        end
     else
         local path = string.gsub(text, "\\", "/")
         if not BG.fileExists(path) and not BG.folderExists(path) then
@@ -2611,15 +2713,21 @@ function BG.resolve(source, settings, target, status)
     if kind == "gif" then return BG.gifFrames(data, folder, settings, target, status) end
     if kind == "png" or kind == "jpg" then
         -- a downloaded picture has to be on disk before getcustomasset can use it
-        if type(writefile) ~= "function" then return nil, "downloaded backgrounds need writefile" end
-        BG.makeFolders(folder .. "/cache")
-        local path = folder .. "/cache/" .. BG.hash(data) .. "." .. kind
-        if not BG.fileExists(path) and not pcall(writefile, path, data) then
-            return nil, "could not save the downloaded picture"
+        local path = savedPath
+        if not path then
+            if type(writefile) ~= "function" then return nil, "downloaded backgrounds need writefile" end
+            BG.makeFolders(folder .. "/cache")
+            path = folder .. "/cache/" .. BG.hash(data) .. "." .. kind
+            if not BG.fileExists(path) and not pcall(writefile, path, data) then
+                return nil, "could not save the downloaded picture"
+            end
         end
         local id, err = BG.customAsset(path)
         if not id then return nil, err end
         return { kind = "image", ids = { id } }
+    end
+    if string.sub(data, 1, 4) == "RIFF" and string.sub(data, 9, 12) == "WEBP" then
+        return nil, "that is a WEBP image - Roblox cannot show it. Convert it to .gif (ezgif.com/webp-to-gif) and use that"
     end
     if string.match(data, "^%s*<") then
         return nil, "that link is a web page, not a picture - open the GIF by itself and copy that link (it should end in .gif)"
@@ -2818,6 +2926,7 @@ end
 --     Speed            GIF speed multiplier (1)
 --     MaxFrames        long GIFs are thinned to this many frames (120)
 --     FPS              playback rate for frame folders and frame lists (15)
+--     Refresh          true downloads a link again instead of using the saved copy
 --     OnStatus(text)   "loading", "downloading", "converting", "ready", "failed"
 -- Yields while it downloads or converts, so call it from a spawned thread if
 -- that matters. The first load of a GIF converts it; later loads use the cache.
