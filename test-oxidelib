@@ -1936,9 +1936,7 @@ function Library:CreateWindow(opts)
 
     -- ── FOCUS GLOW ────────────────────────────────────────────────────────
     -- A soft halo in the accent colour (the background picture's colour when
-    -- it has one) that lights up while the mouse is on the window or the tab
-    -- bar, or while dragging or typing in it, so it is clear the menu has the
-    -- mouse. Touch screens have no hover, so there it stays lit.
+    -- it has one) around the window while it is open.
     windowRef._focusGlowOn = opts.FocusGlow ~= false
     do
         local glow = make("Frame", {
@@ -1959,27 +1957,10 @@ function Library:CreateWindow(opts)
             line:SetAttribute("Theme_Color", nil)
             rings[i] = { stroke = line, strength = 1 - ring[2] }
         end
-        local dragging = false
-        local baseDragStart, baseDragEnd = onDragStart, onDragEnd
-        onDragStart = function() dragging = true; baseDragStart() end
-        onDragEnd = function() dragging = false; baseDragEnd() end
-        local function mouseOn(obj, extra)
-            if not (obj and obj.Visible) then return false end
-            local m = UserInputService:GetMouseLocation()
-            local p, s = obj.AbsolutePosition, obj.AbsoluteSize
-            return m.X >= p.X - extra and m.Y >= p.Y - extra and m.X <= p.X + s.X + extra and m.Y <= p.Y + s.Y + extra
-        end
         local level, t, color = 0, 0, nil
         table.insert(windowRef._connections, RunService.RenderStepped:Connect(function(dt)
-            local want = 0
-            if windowRef._focusGlowOn and screenGui.Enabled and container.Visible and main.Visible then
-                local box = UserInputService:GetFocusedTextBox()
-                if isMobile or dragging or mouseOn(main, 6) or mouseOn(hotbar, 4)
-                    or (box ~= nil and box:IsDescendantOf(screenGui)) then
-                    want = 1
-                end
-            end
-            -- lights up quickly, fades out a little slower
+            local want = (windowRef._focusGlowOn and screenGui.Enabled and container.Visible and main.Visible) and 1 or 0
+            -- fades in when the menu opens, out when it is hidden or switched off
             level = level + (want - level) * math.min(1, dt * (want > level and 12 or 6))
             if want == 0 and level < 0.01 then
                 level = 0
@@ -3562,7 +3543,7 @@ function Window:SetUIVisible(v)
     self.ScreenGui.Enabled = v==true; return v==true
 end
 function Window:ToggleUI() return self:SetUIVisible(not self._uiVisible) end
--- the glow around the window while the mouse is on it (on by default)
+-- the glow around the window (on by default)
 function Window:SetFocusGlow(v)
     self._focusGlowOn = v ~= false
     return self._focusGlowOn
