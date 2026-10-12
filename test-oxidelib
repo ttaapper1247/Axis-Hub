@@ -658,6 +658,20 @@ end
 local function hasFileApi()
     return type(writefile) == "function" and type(readfile) == "function"
 end
+-- Some executors drop a writefile of more than about 24 KB without an error,
+-- so anything bigger is written in pieces with appendfile.
+local WRITE_PIECE = 16384
+local function writeLarge(path, data)
+    if #data <= WRITE_PIECE or type(appendfile) ~= "function" then
+        writefile(path, data)
+        return
+    end
+    writefile(path, string.sub(data, 1, WRITE_PIECE))
+    for i = WRITE_PIECE + 1, #data, WRITE_PIECE do
+        appendfile(path, string.sub(data, i, i + WRITE_PIECE - 1))
+    end
+end
+Library.WriteFile = writeLarge
 local function ensureConfigFolder()
     if type(makefolder) ~= "function" or type(isfolder) ~= "function" then return end
     local parts = string.split(Library.ConfigFolder, "/")
@@ -686,7 +700,7 @@ function Library:SaveConfig(name)
         return HttpService:JSONEncode(Library:GetConfig())
     end)
     if not ok then warn("[Oxidelib] SaveConfig failed to encode config"); return false end
-    local wrote = pcall(writefile, configPath(name), encoded)
+    local wrote = pcall(writeLarge, configPath(name), encoded)
     if not wrote then warn("[Oxidelib] SaveConfig failed to write file"); return false end
     return true
 end
@@ -2621,7 +2635,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
                 for i = 1, n do
                     if not BG.fileExists(frameFile(i)) then
                         local okRead, body = pcall(readfile, oldFrameFile(i))
-                        if not (okRead and type(body) == "string" and pcall(writefile, frameFile(i), body)) then
+                        if not (okRead and type(body) == "string" and pcall(writeLarge, frameFile(i), body)) then
                             meta = nil -- convert it again instead
                             break
                         end
@@ -2651,7 +2665,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
                     local ok, got = pcall(BG.pickAccent, px, w, h)
                     accent = ok and got or nil
                 end
-                return (pcall(writefile, frameFile(i), BG.encodePng(w, h, px, pause)))
+                return (pcall(writeLarge, frameFile(i), BG.encodePng(w, h, px, pause)))
             end,
         })
         if not info then return nil, err end
@@ -2660,7 +2674,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
             sourceWidth = info.width, sourceHeight = info.height, sourceFrames = info.sourceFrames,
             accent = accent or false,
         }
-        pcall(writefile, metaPath, HttpService:JSONEncode(meta))
+        pcall(writeLarge, metaPath, HttpService:JSONEncode(meta))
     end
     if meta.accent == nil then
         -- converted before colours were picked: read only the first frame
@@ -2678,7 +2692,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
             end,
         })
         meta.accent = got or false
-        pcall(writefile, metaPath, HttpService:JSONEncode(meta))
+        pcall(writeLarge, metaPath, HttpService:JSONEncode(meta))
     end
     local ids = {}
     for i = 1, #meta.delays do
@@ -2864,7 +2878,7 @@ function BG.resolve(source, settings, target, status, alive)
                             pcall(delfile, stem .. "." .. ext)
                         end
                     end
-                    if pcall(writefile, stem .. "." .. kind, body) then savedPath = stem .. "." .. kind end
+                    if pcall(writeLarge, stem .. "." .. kind, body) then savedPath = stem .. "." .. kind end
                 end
             else
                 -- the link stopped working, but the copy from last time is still good
@@ -2904,7 +2918,7 @@ function BG.resolve(source, settings, target, status, alive)
             if type(writefile) ~= "function" then return nil, "your executor can't save files" end
             BG.makeFolders(folder .. "/cache")
             path = folder .. "/cache/" .. BG.hash(data) .. "." .. kind
-            if not BG.fileExists(path) and not pcall(writefile, path, data) then
+            if not BG.fileExists(path) and not pcall(writeLarge, path, data) then
                 return nil, "couldn't save the picture"
             end
         end
