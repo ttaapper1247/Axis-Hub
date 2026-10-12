@@ -2517,9 +2517,15 @@ function BG.customAsset(path)
     if type(load) ~= "function" then
         return nil, "your executor has no getcustomasset, so only rbxassetid works"
     end
-    local ok, id = pcall(load, path)
-    if not ok or type(id) ~= "string" or id == "" then return nil, "could not load " .. tostring(path) end
-    return id
+    -- on some executors a file is only usable a moment after writefile
+    -- returns, so a GIF frame saved a moment ago fails on the first go
+    local stop = os.clock() + 5
+    while true do
+        local ok, id = pcall(load, path)
+        if ok and type(id) == "string" and id ~= "" then return id end
+        if os.clock() > stop then return nil, "could not load " .. tostring(path) end
+        task.wait(0.2)
+    end
 end
 
 -- FNV-1a over (a sample of) the bytes, plus the length. Names the cache folder.
