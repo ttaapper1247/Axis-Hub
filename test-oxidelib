@@ -229,6 +229,11 @@ rebuildReverse()
 -- Window background helpers. Declared up here because `paint` reports theme-key
 -- changes to it; the functions themselves are filled in before WINDOW METHODS.
 local BG = {}
+-- The theme's own accent colours. While a background with a clear colour
+-- shows, C's accent keys take the picture's colour instead (BG.syncAccent).
+BG.ACCENT_KEYS = { "Accent", "AccentDim", "AccentText", "KnobAccent" }
+BG.themeAccent = {}
+for _, key in ipairs(BG.ACCENT_KEYS) do BG.themeAccent[key] = C[key] end
 
 local function tween(inst, props)
     TweenService:Create(inst, TWEEN, props):Play()
@@ -542,6 +547,30 @@ end
 -- keep whatever colour their caller asked for.
 local THEME_PROPS = { "BackgroundColor3", "TextColor3", "PlaceholderColor3", "ScrollBarImageColor3", "Color", "ImageColor3" }
 
+-- Repaints everything tagged with a theme key in the colours C holds now.
+function BG.repaint(info)
+    rebuildReverse()
+    for _, gui in ipairs(Library._windows) do
+        if gui and gui.Parent then
+            for _, inst in ipairs(gui:GetDescendants()) do
+                if inst:IsA("UIGradient") then
+                    refreshEdgeGradient(inst)
+                    refreshVerticalFade(inst)
+                end
+                local goal
+                for _, prop in ipairs(THEME_PROPS) do
+                    local key = inst:GetAttribute("Theme_" .. prop)
+                    if key and C[key] then goal = goal or {}; goal[prop] = C[key] end
+                end
+                if goal then TweenService:Create(inst, info or TWEEN, goal):Play() end
+            end
+        end
+    end
+    for _, win in ipairs(Library._windowObjects) do
+        if win._hotbar and BG.paintHotbar then BG.paintHotbar(win) end
+    end
+end
+
 function Library:SetTheme(theme)
     local themeName = nil
     if type(theme) == "string" then
@@ -557,35 +586,32 @@ function Library:SetTheme(theme)
             warn(("[Oxidelib] theme key %s must be a Color3"):format(key)); return false
         end
     end
+    -- the theme's own accent goes back first, so a theme that leaves the
+    -- accent out does not keep the picture's colour as its own
+    for key, value in pairs(BG.themeAccent) do C[key] = value end
     for key in pairs(C) do
         local value = theme[key]
         if value ~= nil then C[key] = value end
     end
+    for _, key in ipairs(BG.ACCENT_KEYS) do BG.themeAccent[key] = C[key] end
+    if BG.accentColor then BG.useAccent(BG.accentColor) end
     Library._currentTheme = themeName or "Custom"
-    rebuildReverse()
-    for _, gui in ipairs(Library._windows) do
-        if gui and gui.Parent then
-            for _, inst in ipairs(gui:GetDescendants()) do
-                if inst:IsA("UIGradient") then
-                    refreshEdgeGradient(inst)
-                    refreshVerticalFade(inst)
-                end
-                local goal
-                for _, prop in ipairs(THEME_PROPS) do
-                    local key = inst:GetAttribute("Theme_" .. prop)
-                    if key and C[key] then goal = goal or {}; goal[prop] = C[key] end
-                end
-                if goal then tween(inst, goal) end
-            end
-        end
-    end
-    for _, win in ipairs(Library._windowObjects) do
-        if win._hotbar and BG.paintHotbar then BG.paintHotbar(win) end
-    end
+    BG.repaint()
     return true
 end
 
 function Library:GetTheme() return Library._currentTheme end
+-- A colour the menu is drawn in right now, e.g. "Accent" (which follows the
+-- background picture while one shows).
+function Library:GetColor(key) return C[key] end
+-- On (the default), the accent takes the background picture's colour while
+-- one shows. Off keeps the theme's accent.
+function Library:SetAccentFromBackground(v)
+    Library.AccentFromBackground = v ~= false
+    BG.note({ match = Library.AccentFromBackground })
+    BG.syncAccent()
+    return Library.AccentFromBackground
+end
 function Library:GetIcons() return ICONS end
 function Library:GetIcon(name) return ICONS[string.lower(tostring(name or ""))] end
 
@@ -1141,6 +1167,349 @@ local function buildMusicPlayer(cfg)
     return toggleMusic, closeMusic
 end
 
+-- ════════════════════════════════════════════════════════════════════════════
+-- LOADING SCREEN
+-- The background shown last time plays in a glowing card while the name slams
+-- in under it, all in the picture's colour. With no saved picture (a first
+-- run, or opts.LoadingBackground = false) it is the same screen without the
+-- card, in the theme's accent.
+-- ════════════════════════════════════════════════════════════════════════════
+local function buildLoadingScreen(screenGui, opts, windowSize)
+    local duration = math.clamp(tonumber(opts.LoadingDuration) or 2.65, 1.5, 8)
+    local overlay  = math.clamp(tonumber(opts.LoadingOverlayTransparency) or 0.35, 0, 0.9)
+    local white, black = Color3.new(1, 1, 1), Color3.new(0, 0, 0)
+    local started = os.clock()
+    local L = { motionDone = false, deadline = started + duration + 4 }
+
+    -- the picture comes from the saved copy only: nothing is downloaded or
+    -- converted here, so it is quick, and a first run just has no card
+    local shot -- nil while looking, false when there is none
+    if opts.LoadingBackground == false then
+        shot = false
+    else
+        task.spawn(function()
+            local note = BG.readNote()
+            local source = type(note.source) == "string" and note.source or ""
+            local target = Vector2.new(math.max(1, windowSize.X.Offset), math.max(1, windowSize.Y.Offset))
+            local ok, result = false, nil
+            if source ~= "" then
+                ok, result = pcall(BG.resolve, source, { CacheOnly = true }, target, function() end, function() return not L.gone end)
+            end
+            if not (ok and type(result) == "table" and type(result.ids) == "table" and #result.ids > 0) then
+                shot = false
+                return
+            end
+            result.scale = BG.scaleMode(note.scale) or "Crop"
+            result.speed = math.clamp(tonumber(note.speed) or 1, 0, 10)
+            shot = result
+            -- the menu takes the picture's colour now, so it does not show the
+            -- theme's colour until its own copy of the picture has loaded
+            local accent = BG.toColor(result.accent)
+            if accent and note.match ~= false then
+                BG.previewAccent = accent
+                BG.syncAccent()
+            end
+        end)
+    end
+
+    -- the loader keeps its own colours: nothing in it is repainted by themes
+    local function untag(inst)
+        for name in pairs(inst:GetAttributes()) do
+            if string.sub(name, 1, 6) == "Theme_" then inst:SetAttribute(name, nil) end
+        end
+    end
+
+    local layer = make("CanvasGroup", {
+        Name = "StartupLoader", Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = black, BackgroundTransparency = 1,
+        GroupTransparency = 0, ZIndex = 500, Parent = screenGui,
+    })
+    L.layer = layer
+
+    if opts.LoadingBlur ~= false then
+        L.blur = Instance.new("BlurEffect")
+        L.blur.Size = 0
+        pcall(function() L.blur.Parent = game:GetService("Lighting") end)
+    end
+    if opts.LoadingSound then
+        local sound = Instance.new("Sound")
+        sound.SoundId = normalizeAssetId(opts.LoadingSound)
+        sound.Volume = 0
+        sound.Looped = false
+        sound.TimePosition = tonumber(opts.LoadingSoundStart) or 0
+        pcall(function() sound.Parent = game:GetService("SoundService") end)
+        L.sound = sound
+    end
+
+    -- the colour glows up from the bottom of the screen
+    local wash = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = white, BackgroundTransparency = 1, ZIndex = 501, Parent = layer })
+    make("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.94), NumberSequenceKeypoint.new(1, 0.72),
+    }), Parent = wash })
+
+    -- 620 x 470 of content, scaled down to fit small screens
+    local content = make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(620, 470), BackgroundTransparency = 1, ZIndex = 502, Parent = layer,
+    })
+    local fit = make("UIScale", { Parent = content })
+    do
+        local cam = Workspace.CurrentCamera
+        local view = cam and cam.ViewportSize or Vector2.new(1280, 720)
+        fit.Scale = math.clamp(math.min(view.X * 0.92 / 620, view.Y * 0.86 / 470), 0.35, 1)
+    end
+    local stage = make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 502, Parent = content,
+    })
+    local motion = make("UIScale", { Parent = stage })
+
+    -- the card: the picture, shaded toward the bottom, with a light that runs
+    -- round its edge and soft rings of glow outside it
+    local cardW = 400
+    local cardH = math.floor(cardW * math.clamp(windowSize.Y.Offset / math.max(1, windowSize.X.Offset), 0.4, 1) + 0.5)
+    local cardWrap = make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(310, 18 + cardH / 2),
+        Size = UDim2.fromOffset(cardW, cardH), BackgroundTransparency = 1, Visible = false, ZIndex = 503, Parent = stage,
+    })
+    local cardScale = make("UIScale", { Scale = 0.82, Parent = cardWrap })
+    local rings = {}
+    for i, ring in ipairs({ { 2, 0.1 }, { 5, 0.62 }, { 10, 0.8 }, { 17, 0.89 }, { 26, 0.95 } }) do
+        local holder = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 503, Parent = cardWrap })
+        corner(holder, 14)
+        rings[i] = {
+            stroke = make("UIStroke", { Thickness = ring[1], Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = holder }),
+            strength = 1 - ring[2],
+        }
+    end
+    local card = make("CanvasGroup", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = black, GroupTransparency = 1, ZIndex = 504, Parent = cardWrap })
+    corner(card, 14)
+    local shade = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = black, ZIndex = 3, Parent = card })
+    make("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.55, 0.9), NumberSequenceKeypoint.new(1, 0.4),
+    }), Parent = shade })
+    local sheen = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = white, ZIndex = 4, Parent = card })
+    local sheenGrad = make("UIGradient", { Rotation = 25, Offset = Vector2.new(-1, 0), Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.4, 1), NumberSequenceKeypoint.new(0.5, 0.55),
+        NumberSequenceKeypoint.new(0.6, 1), NumberSequenceKeypoint.new(1, 1),
+    }), Parent = sheen })
+    local edgeHolder = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 505, Parent = cardWrap })
+    corner(edgeHolder, 14)
+    local edge = make("UIStroke", { Color = white, Thickness = 1.5, Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = edgeHolder })
+    local edgeGrad = make("UIGradient", { Parent = edge })
+
+    -- the name, the subtitle in spaced capitals, a bar and the footer
+    local function label(props)
+        props.AnchorPoint = Vector2.new(0.5, 0.5)
+        props.BackgroundTransparency = 1
+        props.TextTransparency = 1
+        props.TextXAlignment = Enum.TextXAlignment.Center
+        props.ZIndex = 506
+        props.Parent = stage
+        return make("TextLabel", props)
+    end
+    local title = label({
+        Position = UDim2.fromOffset(310, 340), Size = UDim2.fromOffset(600, 50),
+        Text = tostring(opts.LoadingText or opts.Name or "Oxidelib"), Font = Enum.Font.GothamBlack, TextScaled = true,
+        TextColor3 = white, TextStrokeColor3 = black, TextStrokeTransparency = 1,
+    })
+    make("UITextSizeConstraint", { MaxTextSize = 44, Parent = title })
+    local titleScale = make("UIScale", { Scale = 1.7, Parent = title })
+    local titleGrad = make("UIGradient", { Parent = title })
+    local subText = tostring(opts.LoadingSubtitle or "HUB")
+    pcall(function()
+        local letters = {}
+        for _, code in utf8.codes(string.upper(subText)) do table.insert(letters, utf8.char(code)) end
+        subText = table.concat(letters, " ")
+    end)
+    local sub = label({
+        Position = UDim2.fromOffset(310, 381), Size = UDim2.fromOffset(600, 18),
+        Text = subText, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = white,
+    })
+    local track = make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(310, 410), Size = UDim2.fromOffset(240, 4),
+        BackgroundColor3 = white, BackgroundTransparency = 1, ZIndex = 506, Parent = stage,
+    })
+    circle(track)
+    local fill = make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = white, ZIndex = 507, Parent = track })
+    circle(fill)
+    local fillGrad = make("UIGradient", { Parent = fill })
+    local head = make("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(1, 0.5), Size = UDim2.fromOffset(8, 8),
+        BackgroundColor3 = white, BackgroundTransparency = 1, ZIndex = 508, Parent = fill,
+    })
+    circle(head)
+    local headGlow = make("UIStroke", { Color = white, Thickness = 4, Transparency = 1, Parent = head })
+    local footer = label({
+        Position = UDim2.fromOffset(310, 434), Size = UDim2.fromOffset(600, 14),
+        Text = tostring(opts.LoadingFooter or "Oxidelib"), Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = white,
+    })
+    untag(layer)
+    for _, d in ipairs(layer:GetDescendants()) do untag(d) end
+
+    local function tint(acc)
+        local light = acc:Lerp(white, 0.3)
+        local deep = acc:Lerp(black, 0.5)
+        wash.BackgroundColor3 = acc
+        rings[1].stroke.Color = acc:Lerp(white, 0.35)
+        for i = 2, #rings do rings[i].stroke.Color = acc end
+        edgeGrad.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, acc), ColorSequenceKeypoint.new(0.44, acc),
+            ColorSequenceKeypoint.new(0.5, white),
+            ColorSequenceKeypoint.new(0.56, acc), ColorSequenceKeypoint.new(1, acc),
+        })
+        titleGrad.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, light), ColorSequenceKeypoint.new(0.42, light),
+            ColorSequenceKeypoint.new(0.5, white),
+            ColorSequenceKeypoint.new(0.58, light), ColorSequenceKeypoint.new(1, light),
+        })
+        title.TextStrokeColor3 = deep
+        sub.TextColor3 = acc:Lerp(white, 0.65)
+        footer.TextColor3 = acc:Lerp(white, 0.5)
+        fillGrad.Color = ColorSequence.new(deep:Lerp(acc, 0.4), light)
+        headGlow.Color = acc
+    end
+
+    local labels, delays, speed, playing, glowOn = {}, nil, 1, false, false
+    local t, glow, frame, clock = 0, 0, 1, 0
+    local conn
+    conn = RunService.RenderStepped:Connect(function(dt)
+        if not layer.Parent then conn:Disconnect(); return end
+        t += dt
+        titleGrad.Offset = Vector2.new((t * 0.7) % 3 - 1, 0)
+        edgeGrad.Rotation = (t * 110) % 360
+        glow += ((glowOn and 1 or 0) - glow) * math.min(1, dt * 5)
+        local breathe = 0.82 + 0.18 * math.sin(t * 2.6)
+        for i, ring in ipairs(rings) do
+            ring.stroke.Transparency = 1 - ring.strength * glow * (i == 1 and 1 or breathe)
+        end
+        edge.Transparency = 1 - glow
+        -- the GIF plays on its own delays once every frame has loaded
+        local n = #labels
+        if playing and n > 1 then
+            clock += dt * 1000 * speed
+            local cur, guard = frame, 0
+            while clock >= (delays[cur] or 100) and guard < n do
+                clock -= (delays[cur] or 100)
+                cur = cur % n + 1
+                guard += 1
+            end
+            if guard >= n then clock = 0 end
+            if cur ~= frame then
+                labels[frame].Visible = false
+                labels[cur].Visible = true
+                frame = cur
+            end
+        end
+    end)
+
+    local function run()
+        if L.blur then TweenService:Create(L.blur, TweenInfo.new(0.4, Enum.EasingStyle.Quad), { Size = 12 }):Play() end
+        if L.sound then
+            pcall(function() L.sound:Play() end)
+            TweenService:Create(L.sound, TweenInfo.new(0.5), { Volume = math.clamp(tonumber(opts.LoadingSoundVolume) or 0.45, 0, 1) }):Play()
+        end
+        TweenService:Create(layer, TweenInfo.new(0.34, Enum.EasingStyle.Quad), { BackgroundTransparency = overlay }):Play()
+        -- a saved picture is there in a moment; past that it goes on without
+        local stop = os.clock() + 0.9
+        while shot == nil and os.clock() < stop do task.wait() end
+        if not layer.Parent then return end
+        local pic = shot or nil
+        tint((pic and BG.toColor(pic.accent)) or C.Accent)
+        TweenService:Create(wash, TweenInfo.new(0.8, Enum.EasingStyle.Quad), { BackgroundTransparency = 0 }):Play()
+        if pic then
+            delays, speed = pic.delays or {}, pic.speed or 1
+            for i, id in ipairs(pic.ids) do
+                local img = make("ImageLabel", {
+                    Image = id, ScaleType = BG.SCALES[pic.scale] or Enum.ScaleType.Crop,
+                    BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Visible = i == 1, ZIndex = 1, Parent = card,
+                })
+                untag(img)
+                labels[i] = img
+            end
+            local function alive() return layer.Parent ~= nil end
+            -- held back until the first frame has loaded, so it does not pop in
+            -- half drawn; a GIF holds that frame until every frame is loaded
+            BG.preload({ labels[1] }, 1.5, alive)
+            if not layer.Parent then return end
+            if #labels > 1 then
+                task.spawn(function()
+                    BG.preload(labels, 10, alive)
+                    playing = true
+                end)
+            end
+            cardWrap.Visible = true
+            glowOn = true
+            TweenService:Create(cardScale, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+            TweenService:Create(card, TweenInfo.new(0.3, Enum.EasingStyle.Quad), { GroupTransparency = 0 }):Play()
+            task.delay(0.2, function()
+                if sheen.Parent then
+                    TweenService:Create(sheenGrad, TweenInfo.new(0.9, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { Offset = Vector2.new(1, 0) }):Play()
+                end
+            end)
+            task.wait(0.35)
+        else
+            for _, item in ipairs({ title, sub, track, footer }) do
+                item.Position = item.Position + UDim2.fromOffset(0, -150)
+            end
+        end
+        if not layer.Parent then return end
+        -- the name slams in, and everything jolts as it lands
+        TweenService:Create(title, TweenInfo.new(0.14, Enum.EasingStyle.Quad), { TextTransparency = 0, TextStrokeTransparency = 0.55 }):Play()
+        TweenService:Create(titleScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+        task.delay(0.15, function()
+            if not layer.Parent then return end
+            local hit = TweenService:Create(motion, TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1.025 })
+            hit:Play()
+            hit.Completed:Wait()
+            if L.finishing then return end
+            TweenService:Create(motion, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+        end)
+        task.wait(0.22)
+        TweenService:Create(sub, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { TextTransparency = 0.1 }):Play()
+        TweenService:Create(track, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { BackgroundTransparency = 0.88 }):Play()
+        TweenService:Create(head, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { BackgroundTransparency = 0 }):Play()
+        TweenService:Create(headGlow, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { Transparency = 0.55 }):Play()
+        task.wait(0.12)
+        TweenService:Create(footer, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { TextTransparency = 0.35 }):Play()
+        -- the bar fills over the rest of the time
+        local rest = math.max(0.5, duration - (os.clock() - started))
+        TweenService:Create(fill, TweenInfo.new(rest, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { Size = UDim2.fromScale(1, 1) }):Play()
+        task.wait(rest)
+    end
+    task.spawn(function()
+        local ok, err = pcall(run)
+        if not ok then warn("[Oxidelib] loading screen: " .. tostring(err)) end
+        L.motionDone = true
+    end)
+
+    -- fades the loader away as the card flies toward you, then removes it
+    function L.finish()
+        L.finishing = true
+        local info = TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut)
+        local fade = TweenService:Create(layer, info, { GroupTransparency = 1 })
+        fade:Play()
+        TweenService:Create(motion, TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.In), { Scale = 1.12 }):Play()
+        if L.blur then TweenService:Create(L.blur, info, { Size = 0 }):Play() end
+        if L.sound then TweenService:Create(L.sound, TweenInfo.new(0.5), { Volume = 0 }):Play() end
+        fade.Completed:Wait()
+        L.gone = true
+        conn:Disconnect()
+        if layer.Parent then layer:Destroy() end
+        pcall(function() if L.blur then L.blur:Destroy() end end)
+        pcall(function() if L.sound then L.sound:Stop(); L.sound:Destroy() end end)
+        -- if the menu never shows a background of its own, the picture's
+        -- colour does not stay on it
+        task.delay(8, function()
+            if BG.previewAccent then
+                BG.previewAccent = nil
+                BG.syncAccent()
+            end
+        end)
+    end
+    return L
+end
+
 function Library:CreateWindow(opts)
     opts = opts or {}
 
@@ -1203,140 +1572,10 @@ function Library:CreateWindow(opts)
     })
     local containerScale = make("UIScale", { Scale = 1, Parent = container })
 
-    -- ── LOADING SCREEN (slam-in intro, themed with the accent colour) ─────
-    local loadingEnabled      = opts.LoadingAnimation ~= false
-    local loadingDuration     = math.clamp(tonumber(opts.LoadingDuration) or 2.65, 1.5, 8)
-    local loadingText         = tostring(opts.LoadingText or opts.Name or "Oxidelib")
-    local loadingSub          = tostring(opts.LoadingSubtitle or "HUB")
-    local loadingFooter       = tostring(opts.LoadingFooter or "Oxidelib")
-    local overlayTransparency = math.clamp(tonumber(opts.LoadingOverlayTransparency) or 0.35, 0, 0.9)
-
-    -- accent palette derived from the active theme
-    local ACC       = C.Accent
-    local ACC_DARK  = C.AccentDim or Color3.fromRGB(20, 38, 64)
-    local ACC_LIGHT = Color3.fromRGB(255, 255, 255)
-
-    local loadingComplete       = not loadingEnabled
-    local loadingMotionComplete = not loadingEnabled
-    local loadingLayer, loadingContent, loadingLogoScale, loadingTitleScale, loadingProgressFill
-    local loadingBlur, loadingSound
-
-    if loadingEnabled then
-        loadingLayer = make("CanvasGroup", {
-            Name = "StartupLoader", Size = UDim2.fromScale(1, 1),
-            BackgroundColor3 = Color3.fromRGB(0, 0, 0), BackgroundTransparency = 1,
-            GroupTransparency = 0, ZIndex = 500, Parent = screenGui,
-        })
-
-        if opts.LoadingBlur ~= false then
-            loadingBlur = Instance.new("BlurEffect")
-            loadingBlur.Size = 0
-            pcall(function() loadingBlur.Parent = game:GetService("Lighting") end)
-        end
-
-        if opts.LoadingSound then
-            loadingSound = Instance.new("Sound")
-            loadingSound.SoundId = normalizeAssetId(opts.LoadingSound)
-            loadingSound.Volume = 0
-            loadingSound.Looped = false
-            loadingSound.TimePosition = tonumber(opts.LoadingSoundStart) or 0
-            pcall(function() loadingSound.Parent = SoundService end)
-        end
-
-        local function sideLabel(anchorX)
-            local lbl = make("TextLabel", {
-                Size = UDim2.fromOffset(260, 54), Position = UDim2.new(anchorX, 0, 0.5, -27),
-                AnchorPoint = Vector2.new(0.5, 0.5), BackgroundTransparency = 1,
-                Text = loadingText, Font = Enum.Font.GothamBlack, TextScaled = true,
-                TextColor3 = C.White, TextStrokeColor3 = Color3.fromRGB(0, 0, 0), TextStrokeTransparency = 0.45,
-                TextTransparency = 1, ZIndex = 508, Parent = loadingLayer,
-            })
-            make("UIGradient", { Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0, ACC_DARK),
-                ColorSequenceKeypoint.new(0.5, ACC_LIGHT),
-                ColorSequenceKeypoint.new(1, ACC_DARK),
-            }), Parent = lbl })
-            return lbl
-        end
-        local leftLbl  = sideLabel(0.18)
-        local rightLbl = sideLabel(0.82)
-
-        local mainWrap = make("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(80, 36),
-            Position = UDim2.new(0.5, 0, 0.5, -20), BackgroundTransparency = 1, ZIndex = 510, Parent = loadingLayer,
-        })
-        local tag = make("TextLabel", {
-            Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = loadingText,
-            Font = Enum.Font.GothamBlack, TextScaled = true, TextColor3 = C.White,
-            TextStrokeColor3 = Color3.fromRGB(0, 0, 0), TextStrokeTransparency = 0.3,
-            TextXAlignment = Enum.TextXAlignment.Center, TextTransparency = 1, ZIndex = 510, Parent = mainWrap,
-        })
-        local tagGrad = make("UIGradient", { Rotation = 0, Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, ACC_DARK),
-            ColorSequenceKeypoint.new(0.35, ACC),
-            ColorSequenceKeypoint.new(0.5, ACC_LIGHT),
-            ColorSequenceKeypoint.new(0.65, ACC),
-            ColorSequenceKeypoint.new(1, ACC_DARK),
-        }), Parent = tag })
-
-        local line = make("Frame", {
-            Size = UDim2.fromOffset(0, 2), Position = UDim2.new(0.5, 0, 0.5, 60), AnchorPoint = Vector2.new(0.5, 0.5),
-            BackgroundColor3 = ACC, BackgroundTransparency = 1, ZIndex = 510, Parent = loadingLayer,
-        })
-        make("UIGradient", { Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1),
-        }), Parent = line })
-
-        local sub = make("TextLabel", {
-            Size = UDim2.fromOffset(400, 22), Position = UDim2.new(0.5, 0, 0.5, 82), AnchorPoint = Vector2.new(0.5, 0.5),
-            BackgroundTransparency = 1, Text = loadingSub, Font = Enum.Font.GothamBold, TextSize = 16,
-            TextColor3 = ACC_LIGHT, TextStrokeColor3 = Color3.fromRGB(0, 0, 0), TextStrokeTransparency = 0.5,
-            TextXAlignment = Enum.TextXAlignment.Center, TextTransparency = 1, ZIndex = 510, Parent = loadingLayer,
-        })
-        local footer = make("TextLabel", {
-            Size = UDim2.fromOffset(400, 16), Position = UDim2.new(0.5, 0, 0.5, 112), AnchorPoint = Vector2.new(0.5, 0.5),
-            BackgroundTransparency = 1, Text = loadingFooter, Font = Enum.Font.GothamMedium, TextSize = 11,
-            TextColor3 = Color3.fromRGB(200, 150, 90), TextStrokeColor3 = Color3.fromRGB(0, 0, 0), TextStrokeTransparency = 0.6,
-            TextXAlignment = Enum.TextXAlignment.Center, TextTransparency = 1, ZIndex = 510, Parent = loadingLayer,
-        })
-
-        task.spawn(function()
-            if loadingBlur then TweenService:Create(loadingBlur, TweenInfo.new(0.4, Enum.EasingStyle.Quad), { Size = 10 }):Play() end
-            if loadingSound then
-                pcall(function() loadingSound:Play() end)
-                TweenService:Create(loadingSound, TweenInfo.new(0.5), { Volume = math.clamp(tonumber(opts.LoadingSoundVolume) or 0.45, 0, 1) }):Play()
-            end
-            TweenService:Create(loadingLayer, TweenInfo.new(0.34, Enum.EasingStyle.Quad), { BackgroundTransparency = overlayTransparency }):Play()
-            TweenService:Create(leftLbl, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { TextTransparency = 0 }):Play()
-            task.wait(0.16)
-            TweenService:Create(rightLbl, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { TextTransparency = 0 }):Play()
-            task.wait(math.clamp(loadingDuration * 0.4, 0.5, 2.0))
-            if not loadingLayer.Parent then return end
-            local slideInfo = TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
-            TweenService:Create(leftLbl, slideInfo, { Position = UDim2.new(0.5, 0, 0.5, -27) }):Play()
-            TweenService:Create(rightLbl, slideInfo, { Position = UDim2.new(0.5, 0, 0.5, -27) }):Play()
-            task.wait(0.32)
-            leftLbl.Visible = false; rightLbl.Visible = false
-            tag.TextTransparency = 0
-            TweenService:Create(mainWrap, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Size = UDim2.fromOffset(820, 140) }):Play()
-            task.wait(0.26)
-            line.BackgroundTransparency = 0
-            TweenService:Create(line, TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = UDim2.fromOffset(380, 2) }):Play()
-            TweenService:Create(sub, TweenInfo.new(0.4, Enum.EasingStyle.Quad), { TextTransparency = 0 }):Play()
-            task.wait(0.16)
-            TweenService:Create(footer, TweenInfo.new(0.35, Enum.EasingStyle.Quad), { TextTransparency = 0.1 }):Play()
-            task.spawn(function()
-                local off = -0.5
-                while loadingLayer.Parent and not loadingComplete and tag.Parent do
-                    off = off + 0.009; if off > 1.5 then off = -0.5 end
-                    tagGrad.Offset = Vector2.new(off, 0)
-                    task.wait()
-                end
-            end)
-            task.wait(math.clamp(loadingDuration * 0.5, 0.4, 2.5))
-            loadingMotionComplete = true
-        end)
-    end
+    -- ── LOADING SCREEN ────────────────────────────────────────────────────
+    local loadingEnabled  = opts.LoadingAnimation ~= false
+    local loadingComplete = not loadingEnabled
+    local loader = loadingEnabled and buildLoadingScreen(screenGui, opts, windowSize) or nil
 
     -- ── MAIN WINDOW ───────────────────────────────────────────────────────
     local main = make("Frame", {
@@ -1983,7 +2222,7 @@ function Library:CreateWindow(opts)
             end
             glow.Visible = true
             glowScale.Scale = mainRevealScale.Scale
-            local now = windowRef:GetBackgroundAccent() or C.Accent
+            local now = C.Accent
             if now ~= color then
                 color = now
                 rings[1].stroke.Color = now:Lerp(Color3.new(1, 1, 1), 0.35)
@@ -2001,28 +2240,13 @@ function Library:CreateWindow(opts)
     table.insert(Library._windowObjects,windowRef)
     if opts.Visible==false then screenGui.Enabled=false end
 
-    if loadingEnabled and loadingLayer then
+    if loader then
         task.defer(function()
-            while not loadingMotionComplete and screenGui.Parent do RunService.Heartbeat:Wait() end
-            if not screenGui.Parent or not loadingLayer.Parent then return end
+            while not loader.motionDone and screenGui.Parent and os.clock() < loader.deadline do RunService.Heartbeat:Wait() end
+            if not screenGui.Parent then return end
             main.Visible=true; hotbar.Visible=true
             TweenService:Create(mainRevealScale,TweenInfo.new(0.46,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Scale=1}):Play()
-            local fo=TweenService:Create(loadingLayer,TweenInfo.new(0.48,Enum.EasingStyle.Quart,Enum.EasingDirection.InOut),{GroupTransparency=1})
-            local ce=loadingContent and TweenService:Create(loadingContent,TweenInfo.new(0.46,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Position=UDim2.new(0.5,0,0.5,-18),GroupTransparency=1})
-            local le=loadingLogoScale and TweenService:Create(loadingLogoScale,TweenInfo.new(0.42,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Scale=0.84})
-            local te=loadingTitleScale and TweenService:Create(loadingTitleScale,TweenInfo.new(0.42,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Scale=0.95})
-            local pe
-            if loadingProgressFill and loadingProgressFill.Parent then
-                loadingProgressFill.AnchorPoint=Vector2.new(0.5,0.5); loadingProgressFill.Position=UDim2.fromScale(0.5,0.5)
-                pe=TweenService:Create(loadingProgressFill,TweenInfo.new(0.3,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Size=UDim2.new(0,0,1,0)})
-            end
-            fo:Play(); if ce then ce:Play() end; if le then le:Play() end; if te then te:Play() end; if pe then pe:Play() end
-            if loadingBlur then TweenService:Create(loadingBlur,TweenInfo.new(0.48,Enum.EasingStyle.Quart,Enum.EasingDirection.InOut),{Size=0}):Play() end
-            if loadingSound then TweenService:Create(loadingSound,TweenInfo.new(0.5),{Volume=0}):Play() end
-            fo.Completed:Wait()
-            if loadingLayer and loadingLayer.Parent then loadingLayer:Destroy() end
-            pcall(function() if loadingBlur then loadingBlur:Destroy() end end)
-            pcall(function() if loadingSound then loadingSound:Stop(); loadingSound:Destroy() end end)
+            if loader.layer.Parent then loader.finish() end
             if not screenGui.Parent then return end; loadingComplete=true
         end)
     end
@@ -2647,6 +2871,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
         end
     end
     if not meta then
+        if settings.CacheOnly then return nil, "not converted yet" end
         status("converting")
         BG.makeFolders(dir)
         local last = os.clock()
@@ -2676,7 +2901,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
         }
         pcall(writeLarge, metaPath, HttpService:JSONEncode(meta))
     end
-    if meta.accent == nil then
+    if meta.accent == nil and not settings.CacheOnly then
         -- converted before colours were picked: read only the first frame
         local got
         local last = os.clock()
@@ -2866,6 +3091,7 @@ function BG.resolve(source, settings, target, status, alive)
         end
         if not settings.Refresh then data, savedPath = readSaved() end
         if not data then
+            if settings.CacheOnly then return nil, "not saved yet" end
             status("downloading")
             local body, err = BG.download(fetchUrl, discord, folder)
             if body then
@@ -3306,6 +3532,7 @@ function BG.mirrorsOn(win)
     end
     bg.mirrored = true
     BG.paintHotbar(win)
+    BG.syncAccent()
 end
 
 function BG.hotbarGlass(win)
@@ -3367,6 +3594,87 @@ function BG.paintHotbar(win)
     end
 end
 
+-- ── The accent follows the picture ──────────────────────────────────────
+BG.ACCENT_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- A colour in whole RGB steps that no other theme key uses: new parts are
+-- tagged by looking their colour up, so two keys must not share one.
+function BG.freeColor(color, key)
+    local r, g, b = math.floor(color.R * 255 + 0.5), math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5)
+    local step = b < 128 and 1 or -1
+    for _ = 1, 16 do
+        local c = Color3.fromRGB(r, g, b)
+        local hex, taken = c:ToHex(), false
+        for other, value in pairs(C) do
+            if other ~= key and value:ToHex() == hex then taken = true; break end
+        end
+        if not taken then return c end
+        b += step
+    end
+    return Color3.fromRGB(r, g, b)
+end
+
+-- Puts `color` into C's accent keys, or the theme's own accent for nil. The
+-- darker keys keep the theme's brightness and take the picture's hue.
+function BG.useAccent(color)
+    local base = BG.themeAccent
+    for key, value in pairs(base) do C[key] = value end
+    if not color then return end
+    local hue, sat = color:ToHSV()
+    local _, baseSat = base.Accent:ToHSV()
+    -- a grey picture gives grey accents, not red ones
+    local keep = baseSat > 0.05 and math.min(1, sat / baseSat) or 1
+    C.Accent = BG.freeColor(color, "Accent")
+    for _, key in ipairs(BG.ACCENT_KEYS) do
+        if key ~= "Accent" then
+            local _, s, v = base[key]:ToHSV()
+            C[key] = BG.freeColor(Color3.fromHSV(hue, s * keep, v), key)
+        end
+    end
+end
+
+-- The accent is the shown picture's colour (or, at start-up, the colour the
+-- loading screen read from last time's picture) unless that is switched off.
+function BG.syncAccent()
+    local color, shown = nil, false
+    for _, win in ipairs(Library._windowObjects) do
+        local bg = win._bg
+        if bg and bg.mirrored and win.ScreenGui and win.ScreenGui.Parent then
+            shown, color = true, bg.accent
+        end
+    end
+    if shown then BG.previewAccent = nil else color = BG.previewAccent end
+    if Library.AccentFromBackground == false then color = nil end
+    if color == BG.accentColor then return end
+    BG.accentColor = color
+    BG.useAccent(color)
+    BG.repaint(BG.ACCENT_TWEEN)
+end
+
+-- The last background shown is noted, so the next loading screen can play it.
+function BG.notePath()
+    return string.gsub(tostring(Library.BackgroundFolder or "Oxidelib/backgrounds"), "/+$", "") .. "/last.json"
+end
+function BG.readNote()
+    local path = BG.notePath()
+    if not BG.fileExists(path) then return {} end
+    local ok, note = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+    return (ok and type(note) == "table") and note or {}
+end
+function BG.note(fields)
+    if not hasFileApi() then return end
+    local note = BG.readNote()
+    local changed = false
+    for k, v in pairs(fields) do
+        if note[k] ~= v then note[k], changed = v, true end
+    end
+    if not changed then return end
+    pcall(function()
+        BG.makeFolders((string.match(BG.notePath(), "^(.*)/[^/]*$")) or "")
+        writeLarge(BG.notePath(), HttpService:JSONEncode(note))
+    end)
+end
+
 function BG.lastWindow()
     for index = #Library._windowObjects, 1, -1 do
         local window = Library._windowObjects[index]
@@ -3389,6 +3697,8 @@ end
 --     MaxFrames        long GIFs are thinned to this many frames (120)
 --     FPS              playback rate for frame folders and frame lists (15)
 --     Refresh          true downloads a link again instead of using the saved copy
+--     CacheOnly        true only uses what is already saved: nothing is
+--                      downloaded or converted (the loading screen uses this)
 --     OnStatus(text)   "loading", "downloading", "converting", "ready", "failed"
 -- Yields while it downloads or converts, so call it from a spawned thread if
 -- that matters. The first load of a GIF converts it; later loads use the cache.
@@ -3411,6 +3721,9 @@ function Window:SetBackground(source, settings)
         BG.setGlass(self, false)
         bg.source, bg.info = nil, nil
         status("off")
+        BG.previewAccent = nil
+        BG.syncAccent()
+        BG.note({ source = "" })
         return true
     end
     -- the old picture goes as soon as a new one is picked, so it never stays
@@ -3429,11 +3742,15 @@ function Window:SetBackground(source, settings)
     if token ~= bg.token or self._destroyed then return false, "a newer background replaced this one" end
     if not result then
         status("failed")
+        BG.previewAccent = nil
+        BG.syncAccent()
         return false, err
     end
     BG.show(self, result)
     bg.source, bg.info = source, result
     status("ready")
+    local kind = type(source)
+    BG.note({ source = (kind == "string" or kind == "number") and tostring(source) or "", scale = bg.scale, speed = bg.speed })
     return true, result
 end
 
@@ -3470,6 +3787,7 @@ function Window:SetBackgroundScale(v)
     for _, img in ipairs(bg.hotbarEntry and bg.hotbarEntry.imgs or {}) do
         img.ScaleType = BG.SCALES[bg.scale]
     end
+    if bg.source then BG.note({ scale = bg.scale }) end
     return bg.scale
 end
 
@@ -3667,6 +3985,7 @@ function Window:Destroy()
     local i=table.find(Library._windows,self.ScreenGui); if i then table.remove(Library._windows,i) end
     local j=table.find(Library._windowObjects,self);     if j then table.remove(Library._windowObjects,j) end
     if self.ScreenGui then self.ScreenGui:Destroy() end
+    BG.syncAccent()
 end
 
 -- ════════════════════════════════════════════════════════════════════════════
