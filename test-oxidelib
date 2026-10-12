@@ -3906,6 +3906,9 @@ function Window:Notify(opts)
     if type(opts)=="string" then opts={Content=opts} end; opts=opts or {}
     local holder=self._notificationHolder; if not holder or not holder.Parent then return nil end
     local style=getNotificationStyle(opts.Type)
+    -- info is blue to go with the theme's accent, so it takes the picture's
+    -- colour while the accent does
+    local tone=(style==NOTIFICATION_STYLES.info and BG.accentColor) and C.Accent or style.Color
     local dur=tonumber(opts.Duration); if dur==nil then dur=4 end; dur=math.max(dur,0)
     self._notificationOrder=self._notificationOrder+1
     local title=tostring(opts.Title or style.Name)
@@ -3922,8 +3925,13 @@ function Window:Notify(opts)
     cardGrad:SetAttribute("ThemeGradient_Bottom","Accent")
     cardGrad:SetAttribute("ThemeGradient_Strength",0.5)
     refreshVerticalFade(cardGrad)
-    local shimmer=make("Frame",{Name="Shimmer",Size=UDim2.fromScale(1,1),ZIndex=0,BackgroundColor3=Color3.fromRGB(210,225,255),Parent=card})
+    local shimmer=make("Frame",{Name="Shimmer",Size=UDim2.fromScale(1,1),ZIndex=1,BackgroundColor3=Color3.fromRGB(255,255,255),Parent=card})
+    -- white so the sweep is the accent's own colour; untagged, or a theme
+    -- with a dark "White" would paint it over
+    shimmer:SetAttribute("Theme_BackgroundColor3", nil)
     corner(shimmer,6)
+    -- over a background the card shows the picture too, like the keybind list
+    local unmirror=self:AddBackgroundMirror(card,{Corner=6,ZIndex=0,DimKey="CardBg",MinDim=0.5,Fade=0.35})
     local shimmerGrad=make("UIGradient",{
         Rotation=45,
         Color=ColorSequence.new({
@@ -3952,20 +3960,23 @@ function Window:Notify(opts)
         shimmerGrad.Offset=Vector2.new(nGlowT*2-1,0)
     end)
     -- Style accent: short colored bar on the left edge
-    local accentBar=make("Frame",{Position=UDim2.fromOffset(0,10),Size=UDim2.fromOffset(3,42),BackgroundColor3=style.Color,ZIndex=202,Parent=card})
+    local accentBar=make("Frame",{Position=UDim2.fromOffset(0,10),Size=UDim2.fromOffset(3,42),BackgroundColor3=tone,ZIndex=202,Parent=card})
     corner(accentBar,2)
     -- Style icon chip
-    local iconHolder=make("Frame",{Position=UDim2.fromOffset(14,17),Size=UDim2.fromOffset(28,28),BackgroundColor3=style.Color,BackgroundTransparency=0.88,ZIndex=202,Parent=card})
+    local iconHolder=make("Frame",{Position=UDim2.fromOffset(14,17),Size=UDim2.fromOffset(28,28),BackgroundColor3=tone,BackgroundTransparency=0.88,ZIndex=202,Parent=card})
     corner(iconHolder,8)
-    make("ImageLabel",{Image=style.Icon or ICONS.alert,ImageColor3=style.Color,BackgroundTransparency=1,AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromOffset(15,15),ScaleType=Enum.ScaleType.Fit,ZIndex=203,Parent=iconHolder})
-    make("TextLabel",{Text=title,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=style.Color,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(52,8),Size=UDim2.new(1,-84,0,16),ZIndex=202,Parent=card})
+    make("ImageLabel",{Image=style.Icon or ICONS.alert,ImageColor3=tone,BackgroundTransparency=1,AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromOffset(15,15),ScaleType=Enum.ScaleType.Fit,ZIndex=203,Parent=iconHolder})
+    make("TextLabel",{Text=title,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=tone,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(52,8),Size=UDim2.new(1,-84,0,16),ZIndex=202,Parent=card})
     make("TextLabel",{Text=body,Font=Enum.Font.Gotham,TextSize=11,TextColor3=C.TextGray,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,BackgroundTransparency=1,Position=UDim2.fromOffset(52,27),Size=UDim2.new(1,-64,0,26),ZIndex=202,Parent=card})
     local xb=make("TextButton",{Text="×",Font=Enum.Font.Gotham,TextSize=14,TextColor3=C.TextDim,AnchorPoint=Vector2.new(1,0),Position=UDim2.new(1,-7,0,5),Size=UDim2.fromOffset(20,20),BackgroundTransparency=1,ZIndex=204,Parent=card})
     local closed=false; local handle={}
     local function close(reason)
         if closed then return end; closed=true
         TweenService:Create(card,NOTIFICATION_TWEEN,{Position=UDim2.new(1,12,0,0),GroupTransparency=1}):Play()
-        task.delay(0.2,function() if slot and slot.Parent then slot:Destroy() end end)
+        task.delay(0.2,function()
+            if slot and slot.Parent then slot:Destroy() end
+            if unmirror then unmirror() end
+        end)
         fire(opts.Callback or opts.OnClose,reason or "closed")
     end
     function handle:Close() close("manual") end
