@@ -2638,6 +2638,44 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
     }
 end
 
+-- Discord's link-preview proxy wraps the real link:
+-- /external/<signature>/[%3Fquery/]https/host/path
+function BG.unwrapDiscordProxy(host, path)
+    if not string.match(host, "^images%-ext%-%d+%.discordapp%.net$") then return nil end
+    local rest = string.match(path, "^/external/[^/]+/(.+)$")
+    if not rest then return nil end
+    local query = ""
+    local q, after = string.match(rest, "^(%%3[Ff][^/]*)/(.+)$")
+    if q then
+        query = string.gsub(q, "%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+        rest = after
+    end
+    local scheme, tail = string.match(rest, "^(https?)/(.+)$")
+    if not scheme then return nil end
+    return scheme .. "://" .. tail .. query
+end
+
+-- GIF sites hand a clip out as a video or a WEBP too; the GIF of the same clip
+-- sits at a matching address
+function BG.gifSibling(host, path)
+    local stem, ext = string.match(path, "^(.+)%.(%w+)$")
+    if not stem then return nil end
+    ext = string.lower(ext)
+    if ext ~= "mp4" and ext ~= "webm" and ext ~= "webp" and ext ~= "gifv" then return nil end
+    if host == "static.klipy.com" or host == "i.imgur.com" or host == "i.giphy.com"
+        or string.match(host, "^media%d*%.giphy%.com$") then
+        return "https://" .. host .. stem .. ".gif"
+    end
+    if string.match(host, "^media%d*%.tenor%.com$") or host == "c.tenor.com" then
+        -- /<id><5 letter format>/<name>; AAAAC is the full size GIF
+        local id, name = string.match(stem, "^/([%w_%-]+)/([^/]+)$")
+        if id and #id > 5 then
+            return "https://" .. host .. "/" .. string.sub(id, 1, -6) .. "AAAAC/" .. name .. ".gif"
+        end
+    end
+    return nil
+end
+
 -- Discord's media proxy re-encodes uploads and answers &format=webp with a WEBP,
 -- so attachment links are pointed at the CDN, which serves the file as uploaded.
 -- The attachment path (not the signature, which runs out after about a day)
@@ -2646,6 +2684,10 @@ function BG.linkInfo(url)
     local host, path, query = string.match(url, "^https?://([^/%?#]+)([^%?#]*)%??([^#]*)")
     if not host then return url, url, false end
     host = string.lower(host)
+    local inner = BG.unwrapDiscordProxy(host, path)
+    if inner then return BG.linkInfo(inner) end
+    local gif = BG.gifSibling(host, path)
+    if gif then return gif, gif, false end
     if (host == "media.discordapp.net" or host == "cdn.discordapp.com") and string.match(path, "^/attachments/") then
         local keep = {}
         for pair in string.gmatch(query, "[^&]+") do
@@ -2698,7 +2740,16 @@ function BG.download(url, discord, folder)
         return nil, "your executor broke the download - save the GIF in " .. folder .. " and type its name"
     end
     if expired then return nil, "the link is dead (" .. (code or 404) .. ")" end
+    if string.sub(sample, 5, 8) == "ftyp" then
+        return nil, "that link is a video (MP4) - copy a GIF link instead"
+    end
+    if string.sub(sample, 1, 4) == "\26\69\223\163" then
+        return nil, "that link is a video (WEBM) - copy a GIF link instead"
+    end
     if string.sub(sample, 1, 4) == "RIFF" and string.sub(sample, 9, 12) == "WEBP" then
+        if string.match(string.lower(string.match(url, "^[^%?#]*")), "%.gif$") then
+            return nil, "that file is a WEBP named .gif - turn it into a real GIF (ezgif.com/webp-to-gif)"
+        end
         return nil, "that link is a WEBP - turn it into a GIF first (ezgif.com/webp-to-gif)"
     end
     if string.match(sample, "^%s*<") then
