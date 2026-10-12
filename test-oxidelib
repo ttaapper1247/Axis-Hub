@@ -1934,6 +1934,75 @@ function Library:CreateWindow(opts)
         end)
     end
 
+    -- ── FOCUS GLOW ────────────────────────────────────────────────────────
+    -- A soft halo in the accent colour (the background picture's colour when
+    -- it has one) that lights up while the mouse is on the window or the tab
+    -- bar, or while dragging or typing in it, so it is clear the menu has the
+    -- mouse. Touch screens have no hover, so there it stays lit.
+    windowRef._focusGlowOn = opts.FocusGlow ~= false
+    do
+        local glow = make("Frame", {
+            Name = "FocusGlow", Size = windowSize, BackgroundTransparency = 1,
+            Visible = false, ZIndex = 1, Parent = container,
+        })
+        local glowScale = make("UIScale", { Scale = 1, Parent = glow })
+        -- each ring is wider and fainter than the one before, so together they
+        -- fade out from the edge; the first is a thin brighter line on the rim
+        local rings = {}
+        for i, ring in ipairs({ { 1.5, 0.15 }, { 4, 0.7 }, { 8, 0.83 }, { 13, 0.9 }, { 20, 0.95 } }) do
+            local holder = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 1, Parent = glow })
+            corner(holder, 12)
+            local line = make("UIStroke", {
+                Color = C.Accent, Thickness = ring[1], Transparency = 1,
+                ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = holder,
+            })
+            line:SetAttribute("Theme_Color", nil)
+            rings[i] = { stroke = line, strength = 1 - ring[2] }
+        end
+        local dragging = false
+        local baseDragStart, baseDragEnd = onDragStart, onDragEnd
+        onDragStart = function() dragging = true; baseDragStart() end
+        onDragEnd = function() dragging = false; baseDragEnd() end
+        local function mouseOn(obj, extra)
+            if not (obj and obj.Visible) then return false end
+            local m = UserInputService:GetMouseLocation()
+            local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+            return m.X >= p.X - extra and m.Y >= p.Y - extra and m.X <= p.X + s.X + extra and m.Y <= p.Y + s.Y + extra
+        end
+        local level, t, color = 0, 0, nil
+        table.insert(windowRef._connections, RunService.RenderStepped:Connect(function(dt)
+            local want = 0
+            if windowRef._focusGlowOn and screenGui.Enabled and container.Visible and main.Visible then
+                local box = UserInputService:GetFocusedTextBox()
+                if isMobile or dragging or mouseOn(main, 6) or mouseOn(hotbar, 4)
+                    or (box ~= nil and box:IsDescendantOf(screenGui)) then
+                    want = 1
+                end
+            end
+            -- lights up quickly, fades out a little slower
+            level = level + (want - level) * math.min(1, dt * (want > level and 12 or 6))
+            if want == 0 and level < 0.01 then
+                level = 0
+                if glow.Visible then glow.Visible = false end
+                return
+            end
+            glow.Visible = true
+            glowScale.Scale = mainRevealScale.Scale
+            local now = windowRef:GetBackgroundAccent() or C.Accent
+            if now ~= color then
+                color = now
+                rings[1].stroke.Color = now:Lerp(Color3.new(1, 1, 1), 0.35)
+                for i = 2, #rings do rings[i].stroke.Color = now end
+            end
+            -- the outer rings breathe a little while lit
+            t = t + dt
+            local breathe = 0.85 + 0.15 * math.sin(t * 2.4)
+            for i, ring in ipairs(rings) do
+                ring.stroke.Transparency = 1 - ring.strength * level * (i == 1 and 1 or breathe)
+            end
+        end))
+    end
+
     table.insert(Library._windowObjects,windowRef)
     if opts.Visible==false then screenGui.Enabled=false end
 
@@ -3493,6 +3562,15 @@ function Window:SetUIVisible(v)
     self.ScreenGui.Enabled = v==true; return v==true
 end
 function Window:ToggleUI() return self:SetUIVisible(not self._uiVisible) end
+-- the glow around the window while the mouse is on it (on by default)
+function Window:SetFocusGlow(v)
+    self._focusGlowOn = v ~= false
+    return self._focusGlowOn
+end
+function Library:SetFocusGlow(v)
+    for _, window in ipairs(Library._windowObjects) do window:SetFocusGlow(v) end
+    return v ~= false
+end
 function Window:SetProfileVisible(v)
     if not self._setProfileVisible then return false end
     self._profileOpen=self._setProfileVisible(v==true); return self._profileOpen
