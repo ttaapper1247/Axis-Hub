@@ -752,6 +752,68 @@ end
 -- MUSIC PLAYER BUILDER (kept as its own function so its locals do not count
 -- against CreateWindow's Luau local-register budget)
 -- ════════════════════════════════════════════════════════════════════════════
+-- Window controls: a small glass pill holding a minimize bar and a close
+-- cross, drawn from frames so they stay sharp at any size. Hovering lights a
+-- button (minimize in the accent colour, close in red with a soft glow) and a
+-- press squeezes it. Returns the pill and both buttons; the caller wires the
+-- clicks.
+local CONTROL_RED = Color3.fromRGB(232, 72, 85)
+local function windowControls(parent, zindex, position)
+    local pill = make("Frame", {
+        Name = "CornerControls", AnchorPoint = Vector2.new(1, 0), Position = position,
+        Size = UDim2.fromOffset(52, 24), BackgroundColor3 = C.CardBg, BackgroundTransparency = 0.1,
+        ZIndex = zindex, Parent = parent,
+    })
+    corner(pill, 8)
+    stroke(pill, C.Border)
+    -- lighter at the top, so it reads as a raised piece of glass
+    make("UIGradient", {
+        Rotation = 90,
+        Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(214, 214, 214)),
+        Parent = pill,
+    })
+    local function button(name, x, hot, icon)
+        local color = hot or C.Accent
+        local btn = make("TextButton", {
+            Name = name, Text = "", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, x, 0.5, 0),
+            Size = UDim2.fromOffset(22, 18), BackgroundColor3 = color, BackgroundTransparency = 1,
+            ZIndex = zindex + 1, Parent = pill,
+        })
+        btn:SetAttribute("Theme_BackgroundColor3", nil)
+        corner(btn, 6)
+        local scale = make("UIScale", { Parent = btn })
+        local glow = make("UIStroke", { Color = color, Thickness = 1.5, Transparency = 1, Parent = btn })
+        glow:SetAttribute("Theme_Color", nil)
+        local lines = {}
+        for _, bar in ipairs(icon) do
+            local l = make("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(bar[1], 2), Rotation = bar[2],
+                BackgroundColor3 = C.TextGray, ZIndex = zindex + 2, Parent = btn,
+            })
+            corner(l, 1)
+            table.insert(lines, l)
+        end
+        local over = false
+        local function look()
+            color = hot or C.Accent
+            tween(btn, { BackgroundColor3 = color, BackgroundTransparency = over and (hot and 0 or 0.72) or 1 })
+            tween(glow, { Color = color, Transparency = over and (hot and 0.45 or 0.6) or 1 })
+            for _, l in ipairs(lines) do
+                tween(l, { BackgroundColor3 = over and (hot and Color3.new(1, 1, 1) or C.Accent) or C.TextGray })
+            end
+        end
+        btn.MouseEnter:Connect(function() over = true; look() end)
+        btn.MouseLeave:Connect(function() over = false; look(); tween(scale, { Scale = 1 }) end)
+        btn.MouseButton1Down:Connect(function() tween(scale, { Scale = 0.86 }) end)
+        btn.MouseButton1Up:Connect(function() tween(scale, { Scale = 1 }) end)
+        return btn
+    end
+    local minimizeBtn = button("Minimize", 3, nil, { { 9, 0 } })
+    local closeBtn = button("Close", 27, CONTROL_RED, { { 10, 45 }, { 10, -45 } })
+    return pill, minimizeBtn, closeBtn
+end
+
 local function buildMusicPlayer(cfg)
     local screenGui      = cfg.screenGui
     local profileWidth   = cfg.profileWidth
@@ -762,10 +824,6 @@ local function buildMusicPlayer(cfg)
     local musicConns     = cfg.conns
     local opts           = cfg.opts or {}
 
-    local CLOSE_RED      = Color3.fromRGB(190, 60, 60)
-    local CLOSE_RED_HI   = Color3.fromRGB(212, 80, 80)
-    local MIN_YELLOW     = Color3.fromRGB(255, 195, 0)
-    local MIN_YELLOW_HI  = Color3.fromRGB(255, 211, 70)
     local MUSIC_FOLDER   = tostring(opts.MusicFolder or "OxidelibMusic")
     local musicWidth     = profileWidth
     local fullHeight     = 384
@@ -814,12 +872,8 @@ local function buildMusicPlayer(cfg)
     make("TextLabel", { Text = "MUSIC PLAYER", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.White, TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, Position = UDim2.fromOffset(16, 12), Size = UDim2.new(1, -70, 0, 18), ZIndex = 152, Parent = musicPanel })
     local subLabel = make("TextLabel", { Text = MUSIC_FOLDER, Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.TextDim, TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, Position = UDim2.fromOffset(16, 30), Size = UDim2.new(1, -70, 0, 14), ZIndex = 152, Parent = musicPanel })
     make("Frame", { Position = UDim2.new(0, 16, 0, 48), Size = UDim2.new(1, -32, 0, 1), BackgroundColor3 = C.Border, ZIndex = 151, Parent = musicPanel })
-    -- macOS-style traffic lights (minimize = yellow, close = red), matching the main window
-    local controls = make("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 15), Size = UDim2.fromOffset(32, 13), BackgroundTransparency = 1, ZIndex = 152, Parent = musicPanel })
-    local minimizeBtn = make("TextButton", { Text = "", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(0, 13, 0, 0), Size = UDim2.fromOffset(13, 13), BackgroundColor3 = MIN_YELLOW, ZIndex = 153, Parent = controls })
-    circle(minimizeBtn)
-    local musicCloseBtn = make("TextButton", { Text = "", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(13, 13), BackgroundColor3 = CLOSE_RED, ZIndex = 153, Parent = controls })
-    circle(musicCloseBtn)
+    -- minimize / close, the same as the main window's
+    local _, minimizeBtn, musicCloseBtn = windowControls(musicPanel, 152, UDim2.new(1, -12, 0, 12))
 
     -- Now playing (text only — no album-art tile)
     local npTitle = make("TextLabel", { Text = "Nothing playing", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = C.White, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, BackgroundTransparency = 1, Position = UDim2.fromOffset(16, 58), Size = UDim2.new(1, -32, 0, 18), ZIndex = 152, Parent = musicPanel })
@@ -1039,17 +1093,13 @@ local function buildMusicPlayer(cfg)
     end))
     table.insert(musicConns, { Disconnect = function() pcall(function() musicSound:Stop(); musicSound:Destroy() end) end })
 
-    -- Minimize / close (macOS traffic lights)
+    -- Minimize / close
     local function setMinimized(m)
         minimized = (m == true)
         for _, e in ipairs(lowerEls) do e.Visible = not minimized end
         TweenService:Create(musicPanel, PROFILE_TWEEN, { Size = UDim2.fromOffset(musicWidth, minimized and compactHeight or fullHeight) }):Play()
     end
-    minimizeBtn.MouseEnter:Connect(function() tween(minimizeBtn, { BackgroundColor3 = MIN_YELLOW_HI }) end)
-    minimizeBtn.MouseLeave:Connect(function() tween(minimizeBtn, { BackgroundColor3 = MIN_YELLOW }) end)
     minimizeBtn.MouseButton1Click:Connect(function() setMinimized(not minimized) end)
-    musicCloseBtn.MouseEnter:Connect(function() tween(musicCloseBtn, { BackgroundColor3 = CLOSE_RED_HI }) end)
-    musicCloseBtn.MouseLeave:Connect(function() tween(musicCloseBtn, { BackgroundColor3 = CLOSE_RED }) end)
 
     local function setMusicVisible(v, instant)
         musicOpen = (v == true)
@@ -1379,27 +1429,9 @@ function Library:CreateWindow(opts)
         if windowRef then windowRef._minimized = minimized end
     end
 
-    local controls = make("Frame", {
-        Name = "CornerControls", AnchorPoint = Vector2.new(1,0),
-        Position = UDim2.new(1,-6,0,8), Size = UDim2.fromOffset(36,16),
-        BackgroundTransparency = 1, ZIndex = 10, Parent = main,
-    })
-    local closeBtn = make("TextButton", {
-        Text = "", Font = Enum.Font.GothamBold, TextSize = 1, TextColor3 = C.White,
-        AnchorPoint = Vector2.new(1,0), Position = UDim2.new(1,0,0,0),
-        Size = UDim2.fromOffset(14,14), BackgroundColor3 = Color3.fromRGB(190,60,60),
-        ZIndex = 12, Parent = controls,
-    })
-    closeBtn.AutoButtonColor = false; circle(closeBtn); closeBtn.BorderSizePixel = 0
-    local minimizeBtn = make("TextButton", {
-        Text = "", Font = Enum.Font.GothamBold, TextSize = 1, TextColor3 = C.White,
-        AnchorPoint = Vector2.new(1,0), Position = UDim2.new(0,12,0,0),
-        Size = UDim2.fromOffset(14,14), BackgroundColor3 = Color3.fromRGB(255,195,0),
-        ZIndex = 12, Parent = controls,
-    })
-    minimizeBtn.AutoButtonColor = false; circle(minimizeBtn); minimizeBtn.BorderSizePixel = 0
+    local controls, minimizeBtn, closeBtn = windowControls(main, 10, UDim2.new(1, -10, 0, 10))
     table.insert(mainTopButtons, closeBtn); table.insert(mainTopButtons, minimizeBtn)
-    table.insert(noDrag, closeBtn); table.insert(noDrag, minimizeBtn)
+    table.insert(noDrag, controls); table.insert(noDrag, closeBtn); table.insert(noDrag, minimizeBtn)
 
     burgerButton = make("TextButton", {
         Text = "", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.White,
@@ -1480,6 +1512,9 @@ function Library:CreateWindow(opts)
     make("TextLabel",{Text=lp.DisplayName,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=C.White,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(52,10),Size=UDim2.new(1,-60,0,15),Parent=pcard})
     make("TextLabel",{Text="@"..lp.Name,Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,Position=UDim2.fromOffset(52,28),Size=UDim2.new(1,-60,0,13),Parent=pcard})
 
+    -- a box behind the status line, shown only over a background picture
+    local statusPlate=make("Frame",{Name="StatusPlate",Position=UDim2.new(0,10,1,-32),Size=UDim2.new(1,-20,0,26),BackgroundColor3=C.CardBg,Visible=false,ZIndex=0,Parent=sidebar})
+    corner(statusPlate,8);stroke(statusPlate);statusPlate:SetAttribute("OxidelibPlate",true)
     local statusDot = make("Frame",{AnchorPoint=Vector2.new(0,0.5),Position=UDim2.new(0,16,1,-19),Size=UDim2.fromOffset(6,6),BackgroundColor3=NOTIFICATION_STYLES.success.Color,Parent=sidebar})
     circle(statusDot)
     make("TextLabel",{Text=opts.StatusText or "Oxidelib is ready",Font=Enum.Font.GothamMedium,TextSize=10,TextColor3=C.TextDim,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Position=UDim2.new(0,28,1,-27),Size=UDim2.new(1,-40,0,16),Parent=sidebar})
@@ -2511,12 +2546,34 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
     local key = string.format("%s_%dx%d_%d_v%d", BG.hash(data), target.X, target.Y, maxFrames, BG.CACHE_VERSION)
     local dir = folder .. "/cache/" .. key
     local metaPath = dir .. "/frames.json"
+    -- Frame files carry the key in their name. Some executors copy every
+    -- getcustomasset file into one folder by name alone, so plain 1.png,
+    -- 2.png were shared by every GIF and Roblox kept showing the frames it
+    -- had loaded for the last one in between the new ones.
+    local function frameFile(i) return dir .. "/" .. key .. "_" .. i .. ".png" end
+    local function oldFrameFile(i) return dir .. "/" .. i .. ".png" end
     local meta
     if BG.fileExists(metaPath) then
         local ok, decoded = pcall(function() return HttpService:JSONDecode(readfile(metaPath)) end)
-        if ok and type(decoded) == "table" and type(decoded.delays) == "table" and #decoded.delays > 0
-            and BG.fileExists(dir .. "/" .. #decoded.delays .. ".png") then
-            meta = decoded
+        if ok and type(decoded) == "table" and type(decoded.delays) == "table" and #decoded.delays > 0 then
+            local n = #decoded.delays
+            if BG.fileExists(frameFile(n)) then
+                meta = decoded
+            elseif BG.fileExists(oldFrameFile(n)) then
+                -- saved before the frames were named per GIF: copy them over
+                meta = decoded
+                for i = 1, n do
+                    if not BG.fileExists(frameFile(i)) then
+                        local okRead, body = pcall(readfile, oldFrameFile(i))
+                        if not (okRead and type(body) == "string" and pcall(writefile, frameFile(i), body)) then
+                            meta = nil -- convert it again instead
+                            break
+                        end
+                    end
+                    if type(delfile) == "function" then pcall(delfile, oldFrameFile(i)) end
+                    if i % 8 == 0 then task.wait() end
+                end
+            end
         end
     end
     if not meta then
@@ -2538,7 +2595,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
                     local ok, got = pcall(BG.pickAccent, px, w, h)
                     accent = ok and got or nil
                 end
-                return (pcall(writefile, dir .. "/" .. i .. ".png", BG.encodePng(w, h, px, pause)))
+                return (pcall(writefile, frameFile(i), BG.encodePng(w, h, px, pause)))
             end,
         })
         if not info then return nil, err end
@@ -2569,7 +2626,7 @@ function BG.gifFrames(data, folder, settings, target, status, alive)
     end
     local ids = {}
     for i = 1, #meta.delays do
-        local id, err = BG.customAsset(dir .. "/" .. i .. ".png")
+        local id, err = BG.customAsset(frameFile(i))
         if not id then return nil, err end
         ids[i] = id
     end
@@ -2813,6 +2870,8 @@ function BG.glassOne(win, inst)
     local bg = win._bg
     if not (bg and bg.glass) or not inst:IsA("GuiObject") then return end
     if bg.layer and (inst == bg.layer or inst:IsDescendantOf(bg.layer)) then return end
+    -- plates are boxes that only exist over a picture, to keep text readable
+    if inst:GetAttribute("OxidelibPlate") then inst.Visible = true end
     local want = BG.glassWant(win, inst)
     local base = bg.orig[inst]
     if want == nil then
@@ -2859,6 +2918,9 @@ function BG.setGlass(win, on)
             if inst.Parent then BG.setProp(win, inst, "BackgroundTransparency", base) end
         end
         table.clear(bg.orig)
+        for _, d in ipairs(win.Main:GetDescendants()) do
+            if d:GetAttribute("OxidelibPlate") then d.Visible = false end
+        end
     end
     BG.glassMask(win)
 end
@@ -3032,6 +3094,14 @@ function BG.mirrorLayout(win, entry)
     group.Position = host.Position
     group.Size = UDim2.fromOffset(math.floor(w + 0.5), unit)
     group.Visible = host.Visible
+    -- window sized, so the bar shows the strip just above it, and grown just
+    -- enough to reach the bar's ends, which stick out past the window
+    local img, size = entry.img, win.Main.Size
+    if img and size.X.Offset > 0 then
+        local grow = math.max(1, w / size.X.Offset)
+        img.Size = UDim2.fromOffset(math.ceil(size.X.Offset * grow), math.ceil(size.Y.Offset * grow))
+        img.Position = UDim2.new(0.5, 0, 0, size.Y.Offset - host.Position.Y.Offset)
+    end
 end
 
 function BG.makeMirror(win, entry)
@@ -3051,38 +3121,19 @@ function BG.makeMirror(win, entry)
         local base = make("Frame", { Name = "Base", BackgroundColor3 = C[dimKey], Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = group })
         base:SetAttribute("Theme_BackgroundColor3", dimKey)
     end
-    local function picture(name)
-        return make("ImageLabel", {
-            Name = name, Image = bg.ids[bg.index or 1] or bg.ids[1], BackgroundTransparency = 1,
-            ScaleType = Enum.ScaleType.Crop, Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = group,
-        })
-    end
-    local img = picture("Picture")
+    local img = make("ImageLabel", {
+        Name = "Picture", Image = bg.ids[bg.index or 1] or bg.ids[1], BackgroundTransparency = 1,
+        ScaleType = Enum.ScaleType.Crop, Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = group,
+    })
     local imgs = { img }
-    local tw, th = BG.textureSize(bg.shown)
     if reflect then
-        -- window sized and lined up with the window, so the bar shows the
-        -- strip just above it, mirrored at the window's bottom edge. The bar
-        -- is wider than the window, so copies turned the other way sit left
-        -- and right of it and the picture carries on to the bar's ends.
-        local size = win.Main.Size
-        local w, top = size.X.Offset, -(host.Position.Y.Offset - size.Y.Offset)
-        for side = -1, 1 do
-            local each = side == 0 and img or picture("PictureSide")
-            each.AnchorPoint = Vector2.new(0.5, 0)
-            each.Size = UDim2.fromOffset(w, size.Y.Offset)
-            each.Position = UDim2.new(0.5, side * w, 0, top)
-            each.ScaleType = BG.SCALES[bg.scale] or Enum.ScaleType.Crop
-            if tw then
-                local across = side ~= 0
-                each.ImageRectOffset = Vector2.new(across and tw or 0, th)
-                each.ImageRectSize = Vector2.new(across and -tw or tw, -th)
-            else
-                each.Rotation = 180
-            end
-            if side ~= 0 then table.insert(imgs, each) end
-        end
-    elseif opts.Flip then
+        -- lined up with the window and mirrored at its bottom edge;
+        -- BG.mirrorLayout sizes it
+        img.AnchorPoint = Vector2.new(0.5, 0)
+        img.ScaleType = BG.SCALES[bg.scale] or Enum.ScaleType.Crop
+    end
+    if reflect or opts.Flip then
+        local tw, th = BG.textureSize(bg.shown)
         if tw then
             img.ImageRectOffset = Vector2.new(0, th)
             img.ImageRectSize = Vector2.new(tw, -th)
@@ -3360,6 +3411,17 @@ function Library:SetBackground(source, settings)
     return false, "create a window before calling Library:SetBackground"
 end
 
+-- true while a background picture is showing
+function Window:HasBackground()
+    local bg = self._bg
+    return bg ~= nil and bg.mirrored == true
+end
+
+function Library:HasBackground()
+    local window = BG.lastWindow()
+    return window ~= nil and window:HasBackground()
+end
+
 function Library:GetBackgroundAccent()
     local window = BG.lastWindow()
     return window and window:GetBackgroundAccent() or nil
@@ -3549,6 +3611,9 @@ function Window:AddTab(opts)
 
     local page=make("Frame",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,Parent=self._content})
     local header=make("Frame",{Size=UDim2.new(1,0,0,88),BackgroundTransparency=1,Parent=page})
+    -- a card behind the title and sub-tabs, shown only over a background picture
+    local headerPlate=make("Frame",{Name="HeaderPlate",Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-16,1,-12),BackgroundColor3=C.CardBg,Visible=false,ZIndex=0,Parent=header})
+    corner(headerPlate,10);stroke(headerPlate);headerPlate:SetAttribute("OxidelibPlate",true)
 
     local headerBadge=make("Frame",{Size=UDim2.fromOffset(32,32),Position=UDim2.fromOffset(14,14),BackgroundTransparency=1,Parent=header})
     local headerIconElement = createIconElement(headerBadge, iconType, iconValue, 26, 3)
